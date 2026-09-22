@@ -38,6 +38,8 @@ github.com/DATA-DOG/go-sqlmock v1.5.2 h1:OcvFkGmslmlZibjAjaHm3L//6LiuBgolP7Oputl
 github.com/DATA-DOG/go-sqlmock v1.5.2/go.mod h1:88MAG/4G7SMwSE3CeA0ZKzrT5CiOU3OJ+JlNzwDqpNU=
 github.com/DataDog/go-hll v1.0.2 h1:Mm1HCqDMp/a6g/8OpJLkORYaRMy1AL0Kep8lopOgJeY=
 github.com/DataDog/go-hll v1.0.2/go.mod h1:nVlk+LiOuLOBG2pl+DJtGYBr6r6CUH/bGqebzrCUSKw=
+github.com/Flip-to/googlesqlite v0.3.2-0.20260922225049-2996694e5a9b h1:bbTrKG9Lou3DEYhgic+rQSzPK9slfITOl5aqv0ixGFE=
+github.com/Flip-to/googlesqlite v0.3.2-0.20260922225049-2996694e5a9b/go.mod h1:qDVdMDn398qdVeQStOaOGxOHygeU2S/OZy6mGKsOdAw=
 github.com/GoogleCloudPlatform/golang-samples/bigquery v0.0.0-20221115172052-07ffb99455e8 h1:jEVA33EPpr9R1Uc2vhxqd+PefUOqaYy5rAzC9haWPVg=
 github.com/GoogleCloudPlatform/golang-samples/bigquery v0.0.0-20221115172052-07ffb99455e8/go.mod h1:VB6n8DYUiQ07iCBJ5MTjHy8+zI5FNiNT0IDbZ00nhAc=
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.32.0 h1:rIkQfkCOVKc1OiRCNcSDD8ml5RJlZbH/Xsq7lbpynwc=
@@ -326,8 +328,6 @@ github.com/twpayne/go-geom v1.6.1 h1:iLE+Opv0Ihm/ABIcvQFGIiFBXd76oBIar9drAwHFhR4
 github.com/twpayne/go-geom v1.6.1/go.mod h1:Kr+Nly6BswFsKM5sd31YaoWS5PeDDH2NftJTK7Gd028=
 github.com/xyproto/randomstring v1.0.5 h1:YtlWPoRdgMu3NZtP45drfy1GKoojuR7hmRcnhZqKjWU=
 github.com/xyproto/randomstring v1.0.5/go.mod h1:rgmS5DeNXLivK7YprL0pY+lTuhNQW3iGxZ18UQApw/E=
-github.com/yuriolive/googlesqlite v0.3.2-0.20260922225049-2996694e5a9b h1:7Jr7hIlwKZHNClUWv/2TrmFqnRgFLkeJ/fcSp8gab0Q=
-github.com/yuriolive/googlesqlite v0.3.2-0.20260922225049-2996694e5a9b/go.mod h1:qDVdMDn398qdVeQStOaOGxOHygeU2S/OZy6mGKsOdAw=
 github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo0=
 github.com/yusufpapurcu/wmi v1.2.4/go.mod h1:SBZ9tNy3G9/m5Oi98Zks0QjeHVDvuK0qfxQmPyzfmi0=
 github.com/zeebo/assert v1.3.0 h1:g7C04CbJuIDKNPFHmsk4hwZDO5O+kntRxzaUoNXj+IQ=
