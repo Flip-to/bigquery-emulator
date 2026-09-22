@@ -16,9 +16,39 @@ Every push to `flipto/main` publishes `ghcr.io/flip-to/bigquery-emulator:flipto`
 (moving) and `:flipto-<sha7>` (pinned). Pin the sha tag in anything that must be
 reproducible.
 
+The package is **private** (the org does not allow public packages), so pulling
+needs a login.
+
+**Developers**, once per machine: create a classic personal access token with only
+the `read:packages` scope (GitHub → Settings → Developer settings → Personal
+access tokens → Tokens (classic)), authorize it for the Flip-to org (SSO), then:
+
 ```
+echo <token> | docker login ghcr.io -u <github-username> --password-stdin
 docker run -p 9050:9050 ghcr.io/flip-to/bigquery-emulator:flipto --project=<project> --host=0.0.0.0 --port=9050
 ```
+
+**GitHub Actions in another Flip-to repo** (e.g. `flipto-dbt`): no personal token.
+An org admin grants the repo read access once, on the package page
+(https://github.com/orgs/Flip-to/packages/container/package/bigquery-emulator →
+Package settings → Manage Actions access → add the repo with role **Read**).
+The workflow then logs in with its own `GITHUB_TOKEN`:
+
+```yaml
+permissions:
+  contents: read
+  packages: read
+steps:
+  - uses: docker/login-action@v3
+    with:
+      registry: ghcr.io
+      username: ${{ github.actor }}
+      password: ${{ secrets.GITHUB_TOKEN }}
+  - run: docker run -d -p 9050:9050 ghcr.io/flip-to/bigquery-emulator:flipto-<sha7> --project=<project> --host=0.0.0.0 --port=9050
+```
+
+No login at all: build from the public repo instead
+(`docker build -t bigquery-emulator:flipto https://github.com/Flip-to/bigquery-emulator.git#flipto/main`).
 
 Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 (for example Go's `lib/time/zoneinfo.zip` unzipped to `C:\tmp\zoneinfo`, then
