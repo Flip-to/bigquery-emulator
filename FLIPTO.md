@@ -79,7 +79,7 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 | ASSERT evaluates its condition (was a no-op: every ASSERT passed) | googlesqlite | goccy/googlesqlite#91 |
 | end-of-script cleanup skips a temp table the script already dropped | googlesqlite | goccy/googlesqlite#92 |
 | integral FLOAT64 in ARRAY/STRUCT stays FLOAT64 (was INT64, so division truncated) | googlesqlite | overlaps goccy/googlesqlite#66 (stacked on #63; both cherry-picked) |
-| TO_JSON / TO_JSON_STRING quote DATE, DATETIME, TIME, TIMESTAMP | googlesqlite | PR not opened yet |
+| TO_JSON / TO_JSON_STRING quote DATE, DATETIME, TIME, TIMESTAMP | googlesqlite | goccy/googlesqlite#93 (reopens goccy/bigquery-emulator#428) |
 
 ## Keeping the fork current
 
