@@ -38,8 +38,8 @@ github.com/DATA-DOG/go-sqlmock v1.5.2 h1:OcvFkGmslmlZibjAjaHm3L//6LiuBgolP7Oputl
 github.com/DATA-DOG/go-sqlmock v1.5.2/go.mod h1:88MAG/4G7SMwSE3CeA0ZKzrT5CiOU3OJ+JlNzwDqpNU=
 github.com/DataDog/go-hll v1.0.2 h1:Mm1HCqDMp/a6g/8OpJLkORYaRMy1AL0Kep8lopOgJeY=
 github.com/DataDog/go-hll v1.0.2/go.mod h1:nVlk+LiOuLOBG2pl+DJtGYBr6r6CUH/bGqebzrCUSKw=
-github.com/Flip-to/googlesqlite v0.3.2-0.20260923000007-bb33cf3b94ab h1:I3f/opr8IJYjm4ScW5tM4CjgDoiTTNXcPEQbKCE51zA=
-github.com/Flip-to/googlesqlite v0.3.2-0.20260923000007-bb33cf3b94ab/go.mod h1:XA3OndODDX8qhh0V4MICgxS5gWjQXj+2p0yy3O9AjBg=
+github.com/Flip-to/googlesqlite v0.3.2-0.20260923010141-80e0cdfc9fe5 h1:kdjY9EPFbQ1loEMugFFCM2vjOGkHv9HdQhXtA9RfG7U=
+github.com/Flip-to/googlesqlite v0.3.2-0.20260923010141-80e0cdfc9fe5/go.mod h1:XA3OndODDX8qhh0V4MICgxS5gWjQXj+2p0yy3O9AjBg=
 github.com/GoogleCloudPlatform/golang-samples/bigquery v0.0.0-20221115172052-07ffb99455e8 h1:jEVA33EPpr9R1Uc2vhxqd+PefUOqaYy5rAzC9haWPVg=
 github.com/GoogleCloudPlatform/golang-samples/bigquery v0.0.0-20221115172052-07ffb99455e8/go.mod h1:VB6n8DYUiQ07iCBJ5MTjHy8+zI5FNiNT0IDbZ00nhAc=
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.33.0 h1:l7+6kwRMJNwdCvYdDl7Eax+wzEYHSnNY7zrrfbhDdTA=
