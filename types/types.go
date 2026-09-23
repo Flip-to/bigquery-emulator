@@ -346,8 +346,15 @@ func TableFieldSchemaFromColumnType(name string, t *googlesqlite.ColumnType) *bi
 		}
 	case zsqltypes.STRUCT:
 		fields := make([]*bigqueryv2.TableFieldSchema, 0, len(t.FieldTypes))
-		for _, f := range t.FieldTypes {
-			fields = append(fields, TableFieldSchemaFromColumnType(f.Name, f.Type))
+		for i, f := range t.FieldTypes {
+			fname := f.Name
+			if fname == "" {
+				// BigQuery names anonymous STRUCT fields by their 1-based
+				// position among all fields: STRUCT(1, 'x' AS b, 2) has
+				// fields _field_1, b, _field_3.
+				fname = fmt.Sprintf("_field_%d", i+1)
+			}
+			fields = append(fields, TableFieldSchemaFromColumnType(fname, f.Type))
 		}
 		return &bigqueryv2.TableFieldSchema{
 			Name:   name,
