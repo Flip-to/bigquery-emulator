@@ -478,6 +478,11 @@ func (r *Repository) queryParameterValueToGoValue(ptype *bigqueryv2.QueryParamet
 // from ARRAY at the value level; only the column schema tells them apart.
 func (r *Repository) convertValueToCell(value interface{}, schema *bigqueryv2.TableFieldSchema) (*internaltypes.TableCell, error) {
 	if value == nil {
+		// BigQuery results never carry a NULL array: a NULL ARRAY (at any
+		// nesting depth) is returned as [].
+		if schema != nil && schema.Mode == string(types.RepeatedMode) {
+			return &internaltypes.TableCell{V: []*internaltypes.TableCell{}}, nil
+		}
 		return &internaltypes.TableCell{V: nil}, nil
 	}
 
@@ -537,7 +542,59 @@ func (r *Repository) convertValueToCell(value interface{}, schema *bigqueryv2.Ta
 	// Scalar. Render via fmt.Sprint — matches the legacy behaviour
 	// for non-RECORD, non-REPEATED columns.
 	v := fmt.Sprint(value)
+	if schema != nil && schema.Type == string(types.TIMESTAMP) {
+		v = timestampWireValue(value, v)
+	}
 	return &internaltypes.TableCell{V: v, Bytes: int64(len(v))}, nil
+}
+
+// timestampWireValue renders a TIMESTAMP cell the way BigQuery's
+// jobs.query / getQueryResults / tabledata.list wire format does: seconds
+// since the epoch with microsecond precision ("1709164800.000000").
+// googlesqlite already returns top-level TIMESTAMP columns in that form,
+// but TIMESTAMP values nested in a STRUCT or ARRAY arrive as formatted
+// text ("2024-02-29 00:00:00+00"), which clients fail to parse.
+func timestampWireValue(value interface{}, rendered string) string {
+	var t time.Time
+	switch x := value.(type) {
+	case time.Time:
+		t = x
+	case string:
+		if _, err := strconv.ParseFloat(x, 64); err == nil {
+			return x
+		}
+		parsed, ok := parseTimestampText(x)
+		if !ok {
+			return rendered
+		}
+		t = parsed
+	default:
+		return rendered
+	}
+	micros := t.UnixMicro()
+	sec, frac := micros/1e6, micros%1e6
+	if frac < 0 {
+		sec--
+		frac += 1e6
+	}
+	return fmt.Sprintf("%d.%06d", sec, frac)
+}
+
+func parseTimestampText(s string) (time.Time, bool) {
+	for _, layout := range []string{
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999-07",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05.999999999-07",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02T15:04:05.999999999",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func (r *Repository) CreateOrReplaceTable(ctx context.Context, tx *connection.Tx, projectID, datasetID string, table *types.Table) error {
