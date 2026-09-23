@@ -61,6 +61,8 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 | statement type and CTAS destination on query jobs | emulator | goccy/bigquery-emulator#518 (fixes #370) |
 | CREATE OR REPLACE replaces an existing table | emulator | goccy/bigquery-emulator#519 |
 | anonymous result columns named f0_, f1_, ... | emulator | goccy/bigquery-emulator#520 |
+| failed query reported as invalidQuery, not the retried jobInternalError | emulator | PR not opened yet; prior art goccy/bigquery-emulator#437 (closed unmerged) |
+| temp tables kept out of the dataset metadata sync | emulator | PR not opened yet |
 | LEFT JOIN UNNEST keeps empty/NULL-array rows | googlesqlite | goccy/googlesqlite#85 |
 | SPLIT(NULL) is a NULL array | googlesqlite | goccy/googlesqlite#86 |
 | TVF handle kept alive (GC use-after-free) | googlesqlite | goccy/googlesqlite#87 |
@@ -74,6 +76,9 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 | sub-catalogs without builtins (memory growth per DROP) | googlesqlite | overlaps goccy/googlesqlite#80 |
 | dependency security bumps (grpc 1.83.2, otel/sdk, go-archive, tools) | both | fork only |
 | LIKE `_` and backslash escapes | googlesqlite | overlaps goccy/googlesqlite#67 |
+| ASSERT evaluates its condition (was a no-op: every ASSERT passed) | googlesqlite | PR not opened yet |
+| end-of-script cleanup skips a temp table the script already dropped | googlesqlite | PR not opened yet |
+| integral FLOAT64 in ARRAY/STRUCT stays FLOAT64 (was INT64, so division truncated) | googlesqlite | overlaps goccy/googlesqlite#66 (stacked on #63; both cherry-picked) |
 
 ## Keeping the fork current
 
