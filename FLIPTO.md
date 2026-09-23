@@ -58,6 +58,7 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 
 | change | repo | upstream |
 |---|---|---|
+| useInt64Timestamp applies to TIMESTAMP values nested in STRUCT and ARRAY (Python client failed with "invalid literal for int()", flipto-dbt L4) | emulator | none |
 | googlesqlite bumped to Flip-to/googlesqlite 589e255: bounded memory on DDL-heavy sessions (flipto-dbt L12) | driver | none |
 | statement type and CTAS destination on query jobs | emulator | goccy/bigquery-emulator#518 (fixes #370) |
 | CREATE OR REPLACE replaces an existing table | emulator | goccy/bigquery-emulator#519 |

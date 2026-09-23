@@ -226,19 +226,60 @@ func Format(schema *bigqueryv2.TableSchema, rows []*TableRow, useInt64Timestamp 
 	for _, row := range rows {
 		cells := make([]*TableCell, 0, len(row.F))
 		for colIdx, cell := range row.F {
-			if schema.Fields[colIdx].Type == "TIMESTAMP" && cell.V != nil {
-				cells = append(cells, &TableCell{
-					V: formatTimestampCell(cell.V, useInt64Timestamp),
-				})
-			} else {
-				cells = append(cells, cell)
-			}
+			cells = append(cells, formatCell(cell, schema.Fields[colIdx], useInt64Timestamp))
 		}
 		formattedRows = append(formattedRows, &TableRow{
 			F: cells,
 		})
 	}
 	return formattedRows
+}
+
+// formatCell applies the TIMESTAMP wire format to cell, descending into
+// ARRAY elements and STRUCT fields so that nested TIMESTAMP values use the
+// same encoding as top-level columns (the Python client, for one, decodes
+// nested values with the same int64 parser when useInt64Timestamp is set).
+func formatCell(cell *TableCell, field *bigqueryv2.TableFieldSchema, useInt64Timestamp bool) *TableCell {
+	if cell == nil || cell.V == nil || field == nil {
+		return cell
+	}
+	if field.Mode == "REPEATED" {
+		elems, ok := cell.V.([]*TableCell)
+		if !ok {
+			return cell
+		}
+		elemField := *field
+		elemField.Mode = "NULLABLE"
+		out := make([]*TableCell, len(elems))
+		for i, e := range elems {
+			out[i] = formatCell(e, &elemField, useInt64Timestamp)
+		}
+		return &TableCell{V: out, Bytes: cell.Bytes, Name: cell.Name}
+	}
+	switch field.Type {
+	case "TIMESTAMP":
+		return &TableCell{V: formatTimestampCell(cell.V, useInt64Timestamp), Bytes: cell.Bytes, Name: cell.Name}
+	case "RECORD", "STRUCT":
+		var fields []*TableCell
+		switch r := cell.V.(type) {
+		case TableRow:
+			fields = r.F
+		case *TableRow:
+			fields = r.F
+		default:
+			return cell
+		}
+		out := make([]*TableCell, len(fields))
+		for i, f := range fields {
+			var sub *bigqueryv2.TableFieldSchema
+			if i < len(field.Fields) {
+				sub = field.Fields[i]
+			}
+			out[i] = formatCell(f, sub, useInt64Timestamp)
+		}
+		return &TableCell{V: TableRow{F: out}, Bytes: cell.Bytes, Name: cell.Name}
+	}
+	return cell
 }
 
 // formatTimestampCell renders one TIMESTAMP cell value. A non-string value or
