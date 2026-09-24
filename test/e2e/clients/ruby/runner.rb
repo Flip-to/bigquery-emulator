@@ -7,6 +7,10 @@
 # The comparison logic is intentionally Ruby-specific (Time/Date/BigDecimal
 # mapping) -- verifying that per-language mapping is the point of the suite.
 
+# json 3.x changed JSON.parse in a way multi_json 1.19 (used by
+# google-apis-core) does not handle ("wrong number of arguments (given 2,
+# expected 1)"), so activate the pinned 2.x before anything loads json.
+gem "json", "~> 2.13"
 require "json"
 require "date"
 require "bigdecimal"
@@ -125,12 +129,12 @@ begin
       results << {
         "name" => kase["name"],
         "status" => "error",
-        "detail" => "#{e.class}: #{e.message}",
+        "detail" => "#{e.class}: #{e.message} at #{Array(e.backtrace).first(6).join(" <- ")}",
       }
     end
   end
 rescue StandardError => e
-  detail = "#{e.class}: #{e.message}"
+  detail = "#{e.class}: #{e.message} at #{Array(e.backtrace).first(6).join(" <- ")}"
   results = cases.map do |kase|
     { "name" => kase["name"], "status" => "error", "detail" => detail }
   end
