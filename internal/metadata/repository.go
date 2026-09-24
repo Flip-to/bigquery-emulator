@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS routines (
 }
 
 type Repository struct {
-	db *sql.DB
+	db   *sql.DB
+	jobs *jobCache
 }
 
 func NewRepository(db *sql.DB) (*Repository, error) {
@@ -83,7 +84,8 @@ func NewRepository(db *sql.DB) (*Repository, error) {
 		}
 	}
 	return &Repository{
-		db: db,
+		db:   db,
+		jobs: newJobCache(),
 	}, nil
 }
 
@@ -207,11 +209,9 @@ func (r *Repository) findProjects(ctx context.Context, tx *sql.Tx, ids []string)
 		if err != nil {
 			return nil, err
 		}
-		jobs, err := r.findJobs(ctx, tx, projectID, r.convertToStrings(jobIDs))
-		if err != nil {
-			return nil, err
-		}
-		projects = append(projects, NewProject(r, projectID, datasets, jobs))
+		// jobIDs is a legacy column: jobs are looked up on demand (see Project).
+		_ = jobIDs
+		projects = append(projects, NewProject(r, projectID, datasets, nil))
 	}
 	return projects, nil
 }
@@ -249,11 +249,9 @@ func (r *Repository) FindAllProjects(ctx context.Context) ([]*Project, error) {
 		if err != nil {
 			return nil, err
 		}
-		jobs, err := r.findJobs(ctx, tx, projectID, r.convertToStrings(jobIDs))
-		if err != nil {
-			return nil, err
-		}
-		projects = append(projects, NewProject(r, projectID, datasets, jobs))
+		// jobIDs is a legacy column: jobs are looked up on demand (see Project).
+		_ = jobIDs
+		projects = append(projects, NewProject(r, projectID, datasets, nil))
 	}
 	return projects, nil
 }
@@ -301,6 +299,9 @@ func (r *Repository) DeleteProject(ctx context.Context, tx *sql.Tx, project *Pro
 }
 
 func (r *Repository) FindJob(ctx context.Context, projectID, jobID string) (*Job, error) {
+	if job := r.jobs.get(projectID, jobID); job != nil {
+		return job, nil
+	}
 	conn, err := r.getConnection(ctx)
 	if err != nil {
 		return nil, err
@@ -321,19 +322,61 @@ func (r *Repository) FindJob(ctx context.Context, projectID, jobID string) (*Job
 	if jobs[0].ID != jobID {
 		return nil, nil
 	}
+	r.jobs.put(jobs[0])
 	return jobs[0], nil
 }
 
 func (r *Repository) findJobs(ctx context.Context, tx *sql.Tx, projectID string, jobIDs []string) ([]*Job, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if len(jobIDs) == 1 {
+		rows, err = tx.QueryContext(
+			ctx,
+			"SELECT id, projectID, metadata, result, error FROM jobs WHERE projectID = @projectID AND id = @jobID",
+			sql.Named("projectID", projectID),
+			sql.Named("jobID", jobIDs[0]),
+		)
+	} else {
+		rows, err = tx.QueryContext(
+			ctx,
+			"SELECT id, projectID, metadata, result, error FROM jobs WHERE projectID = @projectID AND id IN UNNEST(@jobIDs)",
+			sql.Named("projectID", projectID),
+			sql.Named("jobIDs", jobIDs),
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return r.scanJobs(rows)
+}
+
+// findProjectJobs returns every job of a project. Only jobs.list needs the
+// whole history; every other path looks jobs up by ID.
+func (r *Repository) findProjectJobs(ctx context.Context, projectID string) ([]*Job, error) {
+	conn, err := r.getConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Commit()
 	rows, err := tx.QueryContext(
 		ctx,
-		"SELECT id, projectID, metadata, result, error FROM jobs WHERE projectID = @projectID AND id IN UNNEST(@jobIDs)",
+		"SELECT id, projectID, metadata, result, error FROM jobs WHERE projectID = @projectID",
 		sql.Named("projectID", projectID),
-		sql.Named("jobIDs", jobIDs),
 	)
 	if err != nil {
 		return nil, err
 	}
+	return r.scanJobs(rows)
+}
+
+func (r *Repository) scanJobs(rows *sql.Rows) ([]*Job, error) {
 	defer rows.Close()
 	jobs := []*Job{}
 	for rows.Next() {
@@ -394,6 +437,7 @@ func (r *Repository) AddJob(ctx context.Context, tx *sql.Tx, job *Job) error {
 	); err != nil {
 		return err
 	}
+	r.jobs.put(job)
 	return nil
 }
 
@@ -420,6 +464,7 @@ func (r *Repository) UpdateJob(ctx context.Context, tx *sql.Tx, job *Job) error 
 	); err != nil {
 		return err
 	}
+	r.jobs.put(job)
 	return nil
 }
 
@@ -431,6 +476,7 @@ func (r *Repository) DeleteJob(ctx context.Context, tx *sql.Tx, job *Job) error 
 	); err != nil {
 		return err
 	}
+	r.jobs.remove(job.ProjectID, job.ID)
 	return nil
 }
 

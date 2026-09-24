@@ -10,11 +10,15 @@ import (
 
 var ErrDuplicatedDataset = errors.New("dataset is already created")
 
+// Project holds a project's datasets. Jobs are not loaded with the project:
+// the job history grows with every query served, and loading it on every
+// request (the project middleware runs per request) made each request cost
+// O(jobs served so far). Jobs are looked up by ID on demand instead; jobMap
+// only caches the jobs this Project instance has added or looked up.
 type Project struct {
 	ID         string
 	datasets   []*Dataset
 	datasetMap map[string]*Dataset
-	jobs       []*Job
 	jobMap     map[string]*Job
 	mu         sync.RWMutex
 	repo       *Repository
@@ -28,24 +32,46 @@ func (p *Project) DatasetIDs() []string {
 	return ids
 }
 
+// JobIDs is kept for the legacy projects.jobIDs column, which is no longer
+// maintained: jobs are found through jobs.projectID.
 func (p *Project) JobIDs() []string {
-	ids := make([]string, len(p.jobs))
-	for i := 0; i < len(p.jobs); i++ {
-		ids[i] = p.jobs[i].ID
-	}
-	return ids
+	return []string{}
 }
 
 func (p *Project) Job(id string) *Job {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.jobMap[id]
+	job, ok := p.jobMap[id]
+	p.mu.RUnlock()
+	if ok {
+		return job
+	}
+	job, err := p.repo.FindJob(context.Background(), p.ID, id)
+	if err != nil || job == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cached, ok := p.jobMap[id]; ok {
+		return cached
+	}
+	p.jobMap[id] = job
+	return job
 }
 
+// Jobs returns every job recorded for the project (jobs.list).
 func (p *Project) Jobs() []*Job {
+	jobs, err := p.repo.findProjectJobs(context.Background(), p.ID)
+	if err != nil {
+		return nil
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.jobs
+	for i, job := range jobs {
+		if cached, ok := p.jobMap[job.ID]; ok {
+			jobs[i] = cached
+		}
+	}
+	return jobs
 }
 
 func (p *Project) Dataset(id string) *Dataset {
@@ -116,14 +142,15 @@ func (p *Project) AddJob(ctx context.Context, tx *sql.Tx, job *Job) error {
 	if _, exists := p.jobMap[job.ID]; exists {
 		return fmt.Errorf("job %s is already created", job.ID)
 	}
+	// A job already in the table is rejected by the jobs primary key; a
+	// lookup here would scan the whole table (see jobCache).
+	if p.repo.jobs.get(p.ID, job.ID) != nil {
+		return fmt.Errorf("job %s is already created", job.ID)
+	}
 	if err := job.Insert(ctx, tx); err != nil {
 		return err
 	}
-	p.jobs = append(p.jobs, job)
 	p.jobMap[job.ID] = job
-	if err := p.repo.UpdateProject(ctx, tx, p); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -132,23 +159,21 @@ func (p *Project) DeleteJob(ctx context.Context, tx *sql.Tx, id string) error {
 	defer p.mu.Unlock()
 	job, exists := p.jobMap[id]
 	if !exists {
-		return fmt.Errorf("job '%s' is not found in project '%s'", id, p.ID)
+		if job = p.repo.jobs.get(p.ID, id); job == nil {
+			found, err := p.repo.findJobs(ctx, tx, p.ID, []string{id})
+			if err != nil {
+				return err
+			}
+			if len(found) != 1 {
+				return fmt.Errorf("job '%s' is not found in project '%s'", id, p.ID)
+			}
+			job = found[0]
+		}
 	}
 	if err := job.Delete(ctx, tx); err != nil {
 		return err
 	}
-	newJobs := make([]*Job, 0, len(p.jobs))
-	for _, job := range p.jobs {
-		if job.ID == id {
-			continue
-		}
-		newJobs = append(newJobs, job)
-	}
-	p.jobs = newJobs
 	delete(p.jobMap, id)
-	if err := p.repo.UpdateProject(ctx, tx, p); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -164,7 +189,6 @@ func NewProject(repo *Repository, id string, datasets []*Dataset, jobs []*Job) *
 	return &Project{
 		ID:         id,
 		datasets:   datasets,
-		jobs:       jobs,
 		datasetMap: datasetMap,
 		jobMap:     jobMap,
 		repo:       repo,
