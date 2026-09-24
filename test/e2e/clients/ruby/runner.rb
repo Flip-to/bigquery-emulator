@@ -125,12 +125,12 @@ begin
       results << {
         "name" => kase["name"],
         "status" => "error",
-        "detail" => "#{e.class}: #{e.message}",
+        "detail" => "#{e.class}: #{e.message} at #{Array(e.backtrace).first(6).join(" <- ")}",
       }
     end
   end
 rescue StandardError => e
-  detail = "#{e.class}: #{e.message}"
+  detail = "#{e.class}: #{e.message} at #{Array(e.backtrace).first(6).join(" <- ")}"
   results = cases.map do |kase|
     { "name" => kase["name"], "status" => "error", "detail" => detail }
   end
