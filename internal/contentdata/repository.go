@@ -500,7 +500,13 @@ func (r *Repository) convertValueToCell(value interface{}, schema *bigqueryv2.Ta
 		cells := []*internaltypes.TableCell{}
 		var totalBytes int64
 		for i := 0; i < rv.Len(); i++ {
-			cell, err := r.convertValueToCell(rv.Index(i).Interface(), &elemSchema)
+			elem := rv.Index(i).Interface()
+			if elem == nil {
+				// BigQuery allows NULL elements in intermediate arrays but
+				// refuses to write one into a result.
+				return nil, fmt.Errorf("Array cannot have a null element; error in writing field %s", schema.Name) //nolint:staticcheck // BigQuery's error text
+			}
+			cell, err := r.convertValueToCell(elem, &elemSchema)
 			if err != nil {
 				return nil, err
 			}

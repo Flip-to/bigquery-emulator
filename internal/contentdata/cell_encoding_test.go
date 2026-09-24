@@ -52,3 +52,17 @@ func TestConvertValueToCellNullArray(t *testing.T) {
 		t.Errorf("null struct: got %s, want %s", got, want)
 	}
 }
+
+// A NULL element in a result array is an error in BigQuery:
+// SELECT ARRAY_AGG(x) AS c0 FROM UNNEST([1, NULL]) AS x fails with
+// "Array cannot have a null element; error in writing field c0".
+func TestConvertValueToCellNullArrayElement(t *testing.T) {
+	arr := &bigqueryv2.TableFieldSchema{Name: "c0", Type: "INTEGER", Mode: "REPEATED"}
+	_, err := NewRepository().convertValueToCell([]interface{}{int64(1), nil}, arr)
+	if err == nil || err.Error() != "Array cannot have a null element; error in writing field c0" {
+		t.Fatalf("err = %v, want BigQuery's null element error", err)
+	}
+	if got, want := cellJSON(t, []interface{}{int64(1), int64(2)}, arr), `{"v":[{"v":"1"},{"v":"2"}]}`; got != want {
+		t.Errorf("array: got %s, want %s", got, want)
+	}
+}
