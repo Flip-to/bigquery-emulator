@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"container/list"
+	"database/sql"
 	"sync"
 )
 
@@ -17,10 +18,16 @@ const maxCachedJobs = 4096
 // row per query, every jobs.query / jobs.get / getQueryResults became
 // O(jobs served so far). Jobs are written through this cache, so recent jobs
 // are found without touching the table.
+//
+// A job written inside a transaction is staged and only enters the cache
+// when that transaction commits (commit); a rollback drops it (discard).
+// Otherwise a job whose transaction failed would stay visible, and the
+// client's retry with the same job ID would be rejected as a duplicate.
 type jobCache struct {
-	mu    sync.Mutex
-	order *list.List
-	items map[jobKey]*list.Element
+	mu      sync.Mutex
+	order   *list.List
+	items   map[jobKey]*list.Element
+	pending map[*sql.Tx][]*Job
 }
 
 type jobKey struct {
@@ -34,7 +41,11 @@ type cachedJob struct {
 }
 
 func newJobCache() *jobCache {
-	return &jobCache{order: list.New(), items: map[jobKey]*list.Element{}}
+	return &jobCache{
+		order:   list.New(),
+		items:   map[jobKey]*list.Element{},
+		pending: map[*sql.Tx][]*Job{},
+	}
 }
 
 // get returns a fresh Job carrying the cached state, as a table read would.
@@ -50,11 +61,42 @@ func (c *jobCache) get(projectID, jobID string) *Job {
 	return NewJob(j.repo, j.ProjectID, j.ID, j.content, j.response, j.err)
 }
 
-func (c *jobCache) put(j *Job) {
+// stage records a job written in tx; it becomes visible on commit.
+func (c *jobCache) stage(tx *sql.Tx, j *Job) {
 	snapshot := NewJob(j.repo, j.ProjectID, j.ID, j.content, j.response, j.err)
-	key := jobKey{j.ProjectID, j.ID}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.pending[tx] = append(c.pending[tx], snapshot)
+}
+
+// commit publishes the jobs staged in tx, in write order.
+func (c *jobCache) commit(tx *sql.Tx) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	jobs := c.pending[tx]
+	delete(c.pending, tx)
+	for _, j := range jobs {
+		c.putLocked(j)
+	}
+}
+
+// discard drops the jobs staged in tx.
+func (c *jobCache) discard(tx *sql.Tx) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.pending, tx)
+}
+
+// put caches a job read from the table (already committed).
+func (c *jobCache) put(j *Job) {
+	snapshot := NewJob(j.repo, j.ProjectID, j.ID, j.content, j.response, j.err)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.putLocked(snapshot)
+}
+
+func (c *jobCache) putLocked(snapshot *Job) {
+	key := jobKey{snapshot.ProjectID, snapshot.ID}
 	if elem, ok := c.items[key]; ok {
 		elem.Value.(*cachedJob).job = snapshot
 		c.order.MoveToFront(elem)

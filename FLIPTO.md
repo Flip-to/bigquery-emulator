@@ -58,6 +58,7 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 
 | change | repo | upstream |
 |---|---|---|
+| a job whose transaction rolls back (or fails to commit) no longer stays in the recent-jobs cache: jobs enter the cache only on commit, so a client retry with the same job ID is not rejected as "job ... is already created"; server-generated job IDs use the runtime-seeded math/rand/v2 source instead of a time^pid seed identical to the Go client's, which made the first jobs.query ID collide with a client jobs.insert ID in-process (flaky TestAnonymousColumnNames) | emulator | none |
 | per-request cost no longer grows with the job history: the project is loaded without its jobs, and recent jobs are served from a bounded cache instead of a full scan of the jobs table (flipto-dbt L12: SELECT 1 went from 0.25 s to 6 s after ~1,750 queries) | emulator | none |
 | googlesqlite bumped to Flip-to/googlesqlite 5dce62e: the native binary starts on Windows without TZDIR (embedded zoneinfo) | driver | none |
 | googlesqlite bumped to Flip-to/googlesqlite 86c0546 (compliance batch 2: MATCH_RECOGNIZE, pipe/DML, KEYS/AEAD, KLL, scalars, BOOL in containers) | driver | none |
