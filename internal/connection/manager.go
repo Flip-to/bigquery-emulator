@@ -9,7 +9,22 @@ import (
 )
 
 type Manager struct {
-	db *sql.DB
+	db    *sql.DB
+	hooks *TxHooks
+}
+
+// TxHooks are called once a Tx ends. OnCommit runs after a successful
+// commit, OnRollback after a rollback or a failed commit. State that must
+// only become visible once the transaction is durable (for example a cache
+// of rows written in it) is published or discarded from here.
+type TxHooks struct {
+	OnCommit   func(*sql.Tx)
+	OnRollback func(*sql.Tx)
+}
+
+// SetTxHooks installs the hooks for every Tx begun afterwards.
+func (m *Manager) SetTxHooks(hooks TxHooks) {
+	m.hooks = &hooks
 }
 
 func NewManager(db *sql.DB) *Manager {
@@ -28,6 +43,7 @@ func (m *Manager) Connection(ctx context.Context, projectID, datasetID string) (
 		ProjectID: projectID,
 		DatasetID: datasetID,
 		Conn:      conn,
+		hooks:     m.hooks,
 	}, nil
 }
 
@@ -35,6 +51,7 @@ type Tx struct {
 	tx        *sql.Tx
 	conn      *Conn
 	committed bool
+	hooksDone bool
 }
 
 func (t *Tx) Tx() *sql.Tx {
@@ -46,16 +63,36 @@ func (t *Tx) RollbackIfNotCommitted() error {
 		return nil
 	}
 	defer t.conn.Conn.Close()
+	defer t.ended(false)
 	return t.tx.Rollback()
 }
 
 func (t *Tx) Commit() error {
 	if err := t.tx.Commit(); err != nil {
+		t.ended(false)
 		return err
 	}
 	t.committed = true
+	t.ended(true)
 	t.conn.Conn.Close()
 	return nil
+}
+
+// ended runs the matching hook once per Tx.
+func (t *Tx) ended(committed bool) {
+	if t.hooksDone || t.conn.hooks == nil {
+		return
+	}
+	t.hooksDone = true
+	if committed {
+		if t.conn.hooks.OnCommit != nil {
+			t.conn.hooks.OnCommit(t.tx)
+		}
+		return
+	}
+	if t.conn.hooks.OnRollback != nil {
+		t.conn.hooks.OnRollback(t.tx)
+	}
 }
 
 func (t *Tx) SetProjectAndDataset(projectID, datasetID string) {
@@ -101,6 +138,7 @@ type Conn struct {
 	ProjectID string
 	DatasetID string
 	Conn      *sql.Conn
+	hooks     *TxHooks
 }
 
 func (c *Conn) Begin(ctx context.Context) (*Tx, error) {

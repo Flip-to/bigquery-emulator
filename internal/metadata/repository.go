@@ -437,7 +437,7 @@ func (r *Repository) AddJob(ctx context.Context, tx *sql.Tx, job *Job) error {
 	); err != nil {
 		return err
 	}
-	r.jobs.put(job)
+	r.jobs.stage(tx, job)
 	return nil
 }
 
@@ -464,8 +464,19 @@ func (r *Repository) UpdateJob(ctx context.Context, tx *sql.Tx, job *Job) error 
 	); err != nil {
 		return err
 	}
-	r.jobs.put(job)
+	r.jobs.stage(tx, job)
 	return nil
+}
+
+// TxCommitted publishes the jobs written in tx to the recent-jobs cache.
+func (r *Repository) TxCommitted(tx *sql.Tx) {
+	r.jobs.commit(tx)
+}
+
+// TxRolledBack drops the jobs written in tx: they never reached the table,
+// so a retry with the same job ID must not find them.
+func (r *Repository) TxRolledBack(tx *sql.Tx) {
+	r.jobs.discard(tx)
 }
 
 func (r *Repository) DeleteJob(ctx context.Context, tx *sql.Tx, job *Job) error {

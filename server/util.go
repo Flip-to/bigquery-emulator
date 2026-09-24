@@ -1,27 +1,23 @@
 package server
 
 import (
-	"math/rand"
-	"os"
-	"sync"
-	"time"
+	"math/rand/v2"
 )
 
 const alphanum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
-var (
-	rngMu sync.Mutex
-	rng   = rand.New(rand.NewSource(time.Now().UnixNano() ^ int64(os.Getpid())))
-)
-
 const randomIDLen = 27
 
+// randomID uses the runtime-seeded math/rand/v2 source. It used to seed its
+// own source with time.Now().UnixNano() ^ pid, exactly as the Go BigQuery
+// client seeds the source for its client-side job IDs; a client in the same
+// process (the server tests) initialized in the same clock tick then drew the
+// same sequence, so the first jobs.query job ID equalled the first jobs.insert
+// job ID and was rejected as "already created".
 func randomID() string {
 	var b [randomIDLen]byte
-	rngMu.Lock()
 	for i := 0; i < len(b); i++ {
-		b[i] = alphanum[rng.Intn(len(alphanum))]
+		b[i] = alphanum[rand.IntN(len(alphanum))]
 	}
-	rngMu.Unlock()
 	return string(b[:])
 }

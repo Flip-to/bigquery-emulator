@@ -79,6 +79,10 @@ func New(storage Storage) (*Server, error) {
 		return nil, err
 	}
 	server.connMgr = connection.NewManager(db)
+	server.connMgr.SetTxHooks(connection.TxHooks{
+		OnCommit:   metaRepo.TxCommitted,
+		OnRollback: metaRepo.TxRolledBack,
+	})
 	server.metaRepo = metaRepo
 	server.contentRepo = contentdata.NewRepository()
 
