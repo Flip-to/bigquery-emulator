@@ -58,6 +58,7 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 
 | change | repo | upstream |
 |---|---|---|
+| googlesqlite bumped to Flip-to/googlesqlite 86c0546 (compliance batch 2: MATCH_RECOGNIZE, pipe/DML, KEYS/AEAD, KLL, scalars, BOOL in containers) | driver | none |
 | googlesqlite bumped to Flip-to/googlesqlite aa4d0f4 (compliance batch); a NULL element in a result array is an error, as in BigQuery ("Array cannot have a null element; error in writing field ...") | driver, emulator | none |
 | useInt64Timestamp applies to TIMESTAMP values nested in STRUCT and ARRAY (Python client failed with "invalid literal for int()", flipto-dbt L4) | emulator | none |
 | googlesqlite bumped to Flip-to/googlesqlite 589e255: bounded memory on DDL-heavy sessions (flipto-dbt L12) | driver | none |
