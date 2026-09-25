@@ -322,7 +322,7 @@ func (r *Repository) FindJob(ctx context.Context, projectID, jobID string) (*Job
 	if jobs[0].ID != jobID {
 		return nil, nil
 	}
-	r.jobs.put(jobs[0])
+	r.jobs.put(jobs[0], jobs[0].encodedSize)
 	return jobs[0], nil
 }
 
@@ -406,10 +406,9 @@ func (r *Repository) scanJobs(rows *sql.Rows) ([]*Job, error) {
 		if jobErr != "" {
 			resErr = errors.New(jobErr)
 		}
-		jobs = append(
-			jobs,
-			NewJob(r, projectID, jobID, &content, &response, resErr),
-		)
+		job := NewJob(r, projectID, jobID, &content, &response, resErr)
+		job.encodedSize = len(metadata) + len(result)
+		jobs = append(jobs, job)
 	}
 	return jobs, nil
 }
@@ -437,7 +436,7 @@ func (r *Repository) AddJob(ctx context.Context, tx *sql.Tx, job *Job) error {
 	); err != nil {
 		return err
 	}
-	r.jobs.stage(tx, job)
+	r.jobs.stage(tx, job, len(metadata)+len(result))
 	return nil
 }
 
@@ -464,7 +463,7 @@ func (r *Repository) UpdateJob(ctx context.Context, tx *sql.Tx, job *Job) error 
 	); err != nil {
 		return err
 	}
-	r.jobs.stage(tx, job)
+	r.jobs.stage(tx, job, len(metadata)+len(result))
 	return nil
 }
 
