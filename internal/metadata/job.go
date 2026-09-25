@@ -20,6 +20,9 @@ type Job struct {
 	completed bool
 	mu        sync.RWMutex
 	repo      *Repository
+	// encodedSize is the size of the stored metadata and result when the
+	// job was read from the jobs table; it is charged to the jobCache.
+	encodedSize int
 }
 
 // QueryFailedError is the error a finished job recorded: its query failed.
