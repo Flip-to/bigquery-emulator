@@ -3774,7 +3774,9 @@ func TestUploadCSVSkipLeadingRows(t *testing.T) {
 		code, resp := httpJSON(t, http.MethodPost,
 			testServer.URL+"/upload/bigquery/v2/projects/test/jobs?uploadType=multipart",
 			uploadBody, map[string]string{"Content-Type": contentType})
-		if code == http.StatusOK {
+		// BigQuery reports rejected load data on the job, not as an HTTP error.
+		status, _ := resp["status"].(map[string]any)
+		if code == http.StatusOK && status["errorResult"] == nil {
 			t.Fatalf("invalid CSV upload unexpectedly succeeded: %v", resp)
 		}
 

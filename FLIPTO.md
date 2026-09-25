@@ -70,6 +70,7 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 | CREATE OR REPLACE replaces an existing table | emulator | goccy/bigquery-emulator#519 |
 | anonymous result columns named f0_, f1_, ... | emulator | goccy/bigquery-emulator#520 |
 | nested wire format: anonymous STRUCT fields named _field_N, nested TIMESTAMP as epoch seconds, NULL arrays as [] | emulator | fork only |
+| load jobs (dbt seed): schema type names and modes accepted in any case (dbt sends `string`/`int64`/`bool`, previously TYPE_UNKNOWN); omitted sourceFormat defaults to CSV; CSV honors fieldDelimiter (incl. `	`/`tab`), quote (any character or empty), nullMarker, encoding (UTF-8 BOM stripped, ISO-8859-1); rejected load data is reported as a DONE job with status.errorResult (kept by jobs.get) instead of an HTTP 500 that clients retry | emulator | none |
 | failed query reported as invalidQuery, not the retried jobInternalError | emulator | goccy/bigquery-emulator#521; prior art goccy/bigquery-emulator#437 (closed unmerged) |
 | temp tables kept out of the dataset metadata sync | emulator | goccy/bigquery-emulator#522 (needs goccy/googlesqlite#92) |
 | LEFT JOIN UNNEST keeps empty/NULL-array rows | googlesqlite | goccy/googlesqlite#85 |
