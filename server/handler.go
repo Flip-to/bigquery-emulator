@@ -55,6 +55,19 @@ func uploadErrorResponse(ctx context.Context, w http.ResponseWriter, err error) 
 	errorResponse(ctx, w, errJobInternalError(err.Error()))
 }
 
+// loadJobFailedStatus is the status of a load job whose data could not be
+// loaded. BigQuery reports such failures on the job (status.errorResult)
+// rather than as an HTTP error, so clients stop retrying the upload and
+// surface the message from jobs.get.
+func loadJobFailedStatus(err error) *bigqueryv2.JobStatus {
+	proto := &bigqueryv2.ErrorProto{Reason: "invalid", Message: err.Error()}
+	return &bigqueryv2.JobStatus{
+		State:       "DONE",
+		ErrorResult: proto,
+		Errors:      []*bigqueryv2.ErrorProto{proto},
+	}
+}
+
 func encodeResponse(ctx context.Context, w http.ResponseWriter, response interface{}) {
 	b, err := json.Marshal(response)
 	if err != nil {
@@ -172,7 +185,30 @@ func (j *UploadJob) normalize(projectID string) *ServerError {
 	if j.JobReference.ProjectId == "" {
 		j.JobReference.ProjectId = projectID
 	}
+	load := j.Configuration.Load
+	// BigQuery defaults sourceFormat to CSV; dbt-bigquery omits it for seeds.
+	load.SourceFormat = strings.ToUpper(load.SourceFormat)
+	if load.SourceFormat == "" {
+		load.SourceFormat = "CSV"
+	}
+	if load.Schema != nil {
+		normalizeLoadSchemaFields(load.Schema.Fields)
+	}
 	return nil
+}
+
+// normalizeLoadSchemaFields upper-cases field types and modes. BigQuery
+// accepts type names in any case (dbt-bigquery sends "string", "int64",
+// "bool"), but the emulator's type table is keyed by the canonical names.
+func normalizeLoadSchemaFields(fields []*bigqueryv2.TableFieldSchema) {
+	for _, f := range fields {
+		if f == nil {
+			continue
+		}
+		f.Type = strings.ToUpper(strings.TrimSpace(f.Type))
+		f.Mode = strings.ToUpper(strings.TrimSpace(f.Mode))
+		normalizeLoadSchemaFields(f.Fields)
+	}
 }
 
 func (j *UploadJob) ToJob() *bigqueryv2.Job {
@@ -275,11 +311,18 @@ func (h *uploadHandler) serveMultipart(w http.ResponseWriter, r *http.Request) {
 		job:     uploadJob,
 		reader:  p,
 	})
-	if err != nil {
+	var serr *ServerError
+	if errors.As(err, &serr) {
 		uploadErrorResponse(ctx, w, err)
 		return
 	}
-	encodeResponse(ctx, w, uploadJob.Content())
+	content := uploadJob.Content()
+	if err != nil {
+		content.Status = loadJobFailedStatus(err)
+	} else {
+		content.Status = &bigqueryv2.JobStatus{State: "DONE"}
+	}
+	encodeResponse(ctx, w, content)
 }
 
 func (h *uploadHandler) serveResumable(w http.ResponseWriter, r *http.Request) {
@@ -380,7 +423,14 @@ func (h *uploadContentHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		job:     job,
 		reader:  r.Body,
 	}); err != nil {
-		uploadErrorResponse(ctx, w, err)
+		var serr *ServerError
+		if errors.As(err, &serr) {
+			uploadErrorResponse(ctx, w, err)
+			return
+		}
+		content := job.Content()
+		content.Status = loadJobFailedStatus(err)
+		encodeResponse(ctx, w, content)
 		return
 	}
 	content := job.Content()
@@ -444,20 +494,6 @@ func (h *uploadContentHandler) normalizeColumnNameForJSONData(columnMap map[stri
 	}
 }
 
-func newLoadCSVReader(reader io.Reader, fieldDelimiter string) (*csv.Reader, error) {
-	csvReader := csv.NewReader(reader)
-	csvReader.FieldsPerRecord = -1
-	if fieldDelimiter == "" {
-		return csvReader, nil
-	}
-	delimiters := []rune(fieldDelimiter)
-	if len(delimiters) != 1 {
-		return nil, fmt.Errorf("fieldDelimiter must be a single character")
-	}
-	csvReader.Comma = delimiters[0]
-	return csvReader, nil
-}
-
 func schemaColumns(fields []*bigqueryv2.TableFieldSchema) []*types.Column {
 	columns := make([]*types.Column, 0, len(fields))
 	for _, field := range fields {
@@ -502,7 +538,7 @@ func csvLoadColumnsAndRows(records [][]string, schemaFields []*bigqueryv2.TableF
 	return schemaColumns(schemaFields), records[dataStart:], nil
 }
 
-func csvRowsToTableData(records [][]string, schemaFields []*bigqueryv2.TableFieldSchema, skipLeadingRows int64, allowJaggedRows bool) ([]*types.Column, types.Data, error) {
+func csvRowsToTableData(records [][]string, schemaFields []*bigqueryv2.TableFieldSchema, skipLeadingRows int64, allowJaggedRows bool, nullMarker string) ([]*types.Column, types.Data, error) {
 	columnToType := map[string]types.Type{}
 	for _, field := range schemaFields {
 		columnToType[field.Name] = types.Type(field.Type)
@@ -522,7 +558,7 @@ func csvRowsToTableData(records [][]string, schemaFields []*bigqueryv2.TableFiel
 			if i < len(record) {
 				colData = record[i]
 			}
-			if colData == "" {
+			if csvCellIsNull(colData, nullMarker, string(columns[i].Type)) {
 				rowData[columns[i].Name] = nil
 			} else {
 				rowData[columns[i].Name] = colData
@@ -555,13 +591,9 @@ func (h *uploadContentHandler) Handle(ctx context.Context, r *uploadContentReque
 	var csvData types.Data
 	var csvDataReady bool
 	if load.SourceFormat == "CSV" {
-		csvReader, err := newLoadCSVReader(r.reader, load.FieldDelimiter)
+		records, err := readLoadCSV(r.reader, load)
 		if err != nil {
 			return err
-		}
-		records, err := csvReader.ReadAll()
-		if err != nil {
-			return fmt.Errorf("failed to read csv: %w", err)
 		}
 		csvRecords = records
 		if !tableExisted && load.Schema == nil && load.Autodetect {
@@ -578,7 +610,7 @@ func (h *uploadContentHandler) Handle(ctx context.Context, r *uploadContentReque
 		}
 		if load.SourceFormat == "CSV" && load.Schema != nil {
 			var err error
-			csvColumns, csvData, err = csvRowsToTableData(csvRecords, load.Schema.Fields, load.SkipLeadingRows, load.AllowJaggedRows)
+			csvColumns, csvData, err = csvRowsToTableData(csvRecords, load.Schema.Fields, load.SkipLeadingRows, load.AllowJaggedRows, load.NullMarker)
 			if err != nil {
 				return err
 			}
@@ -614,7 +646,7 @@ func (h *uploadContentHandler) Handle(ctx context.Context, r *uploadContentReque
 			break
 		}
 		var err error
-		columns, data, err = csvRowsToTableData(csvRecords, tableContent.Schema.Fields, load.SkipLeadingRows, load.AllowJaggedRows)
+		columns, data, err = csvRowsToTableData(csvRecords, tableContent.Schema.Fields, load.SkipLeadingRows, load.AllowJaggedRows, load.NullMarker)
 		if err != nil {
 			return err
 		}
@@ -1196,7 +1228,11 @@ type jobsGetRequest struct {
 
 func (h *jobsGetHandler) Handle(ctx context.Context, r *jobsGetRequest) (*bigqueryv2.Job, error) {
 	content := *r.job.Content()
-	content.Status = &bigqueryv2.JobStatus{State: "DONE"}
+	// Keep a failure recorded on the job (e.g. a load whose data was
+	// rejected) so jobs.get reports it in status.errorResult.
+	if content.Status == nil || content.Status.ErrorResult == nil {
+		content.Status = &bigqueryv2.JobStatus{State: "DONE"}
+	}
 	return &content, nil
 }
 
@@ -3184,6 +3220,9 @@ func createTableMetadata(ctx context.Context, tx *connection.Tx, server *Server,
 func (h *tablesInsertHandler) Handle(ctx context.Context, r *tablesInsertRequest) (*bigqueryv2.Table, *ServerError) {
 	if r.table.ExternalDataConfiguration != nil {
 		return h.handleExternalTable(ctx, r)
+	}
+	if r.table.Schema != nil {
+		normalizeLoadSchemaFields(r.table.Schema.Fields)
 	}
 	conn, err := r.server.connMgr.Connection(ctx, r.project.ID, r.dataset.ID)
 	if err != nil {
