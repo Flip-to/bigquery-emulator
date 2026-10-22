@@ -25,6 +25,7 @@ DOCKERFILE
   docker buildx build --no-cache --progress=plain -f "$work/Dockerfile" "$dir"
   ;;
 extract)
+  docker buildx du --verbose --filter type=exec.cachemount || true
   cat > "$work/Dockerfile" <<DOCKERFILE
 FROM busybox:1 AS copy
 RUN $mounts du -sh /go/pkg/mod /root/.cache/go-build && mkdir -p /out && cp -a /go/pkg/mod /out/mod && cp -a /root/.cache/go-build /out/build
