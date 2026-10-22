@@ -31,27 +31,15 @@ jobs:
 
       - name: Restore Go caches
         uses: actions/cache@v4
-        id: go-cache
         with:
-          path: |
-            go-mod
-            go-build
+          path: ${{ runner.temp }}/go-cache
           key: image-go-${{ hashFiles('go.sum') }}-${{ github.sha }}
           restore-keys: |
             image-go-${{ hashFiles('go.sum') }}-
             image-go-
 
-      # The type=gha cache exports layers only, not RUN --mount=type=cache
-      # contents. Inject the restored dirs into BuildKit's cache mounts and
-      # extract them again after the build so actions/cache saves them.
-      - uses: reproducible-containers/buildkit-cache-dance@v3
-        with:
-          cache-map: |
-            {
-              "go-mod": "/go/pkg/mod",
-              "go-build": "/root/.cache/go-build"
-            }
-          skip-extraction: ${{ steps.go-cache.outputs.cache-hit }}
+      - name: Seed BuildKit Go cache mounts
+        run: .github/scripts/go-cache-mounts.sh inject "${{ runner.temp }}/go-cache"
 
       # Only flipto/main publishes; dispatch from other refs builds without
       # pushing so the moving :flipto tag is never overwritten.
@@ -74,3 +62,7 @@ jobs:
           build-args: |
             VERSION=flipto-${{ github.sha }}
             REVISION=${{ github.sha }}
+
+      # Runs before actions/cache's post step, which saves the directory.
+      - name: Extract BuildKit Go cache mounts
+        run: .github/scripts/go-cache-mounts.sh extract "${{ runner.temp }}/go-cache"

@@ -21,7 +21,7 @@ ARG REVISION
 # The builder stage runs on the native build platform and cross-compiles
 # for the requested target, so multi-arch image builds need no QEMU.
 # Cache mounts keep the module and build caches across builds; CI persists
-# them between runs with buildkit-cache-dance (see flipto-image.yml).
+# them between runs with .github/scripts/go-cache-mounts.sh.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /go/bin/bigquery-emulator \
