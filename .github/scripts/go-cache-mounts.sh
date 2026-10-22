@@ -13,28 +13,32 @@ mode=$1
 dir=$2
 mounts='--mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build'
 work=$(mktemp -d)
+# --no-cache would also give the RUN step fresh, empty cache mounts, so a
+# timestamp file busts the step cache instead.
+date +%s%N > "$work/buildstamp"
 
 case "$mode" in
 inject)
   mkdir -p "$dir/mod" "$dir/build"
+  cp "$work/buildstamp" "$dir/buildstamp"
   cat > "$work/Dockerfile" <<DOCKERFILE
 FROM busybox:1
 COPY . /seed
-RUN $mounts cp -a /seed/mod/. /go/pkg/mod/ && cp -a /seed/build/. /root/.cache/go-build/ && du -sh /go/pkg/mod /root/.cache/go-build
+RUN $mounts cp -a /seed/mod/. /go/pkg/mod/ && cp -a /seed/build/. /root/.cache/go-build/
 DOCKERFILE
-  docker buildx build --no-cache --progress=plain -f "$work/Dockerfile" "$dir"
+  docker buildx build --progress=plain -f "$work/Dockerfile" "$dir"
   ;;
 extract)
-  docker buildx du --verbose --filter type=exec.cachemount || true
   cat > "$work/Dockerfile" <<DOCKERFILE
 FROM busybox:1 AS copy
-RUN $mounts du -sh /go/pkg/mod /root/.cache/go-build && mkdir -p /out && cp -a /go/pkg/mod /out/mod && cp -a /root/.cache/go-build /out/build
+COPY buildstamp /buildstamp
+RUN $mounts mkdir -p /out && cp -a /go/pkg/mod /out/mod && cp -a /root/.cache/go-build /out/build
 FROM scratch
 COPY --from=copy /out /
 DOCKERFILE
   # Module cache files are read-only; make them removable first.
   if [ -d "$dir" ]; then chmod -R u+w "$dir"; rm -rf "$dir"; fi
-  docker buildx build --no-cache --progress=plain -f "$work/Dockerfile" \
+  docker buildx build --progress=plain -f "$work/Dockerfile" \
     --output "type=local,dest=$dir" "$work"
   du -sh "$dir"/*
   ;;
