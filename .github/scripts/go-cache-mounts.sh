@@ -1,30 +1,36 @@
 #!/usr/bin/env bash
-# Moves the Dockerfile's Go cache mounts (/go/pkg/mod, /root/.cache/go-build)
-# in and out of BuildKit, so actions/cache can persist them between runs.
-# The type=gha layer cache does not export RUN --mount=type=cache contents.
-# Same technique as reproducible-containers/buildkit-cache-dance, which the
-# org's action allowlist does not include.
+# Moves the Dockerfile's Go build cache mount (/root/.cache/go-build) in and
+# out of BuildKit, so actions/cache can persist it between runs. The type=gha
+# layer cache does not export RUN --mount=type=cache contents. Same technique
+# as reproducible-containers/buildkit-cache-dance, which the org's action
+# allowlist does not include. The module cache is left out: re-downloading it
+# takes about 20s, compiling is what the build cache saves.
 #
-#   go-cache-mounts.sh inject  DIR   seed the mounts from DIR/{mod,build}
-#   go-cache-mounts.sh extract DIR   copy the mounts back out to DIR
+#   go-cache-mounts.sh inject  DIR   seed the mount from DIR/go-build.tar
+#   go-cache-mounts.sh extract DIR   write the mount out to DIR/go-build.tar
 set -euo pipefail
 
 mode=$1
 dir=$2
-mounts='--mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build'
+mount='--mount=type=cache,target=/root/.cache/go-build'
 work=$(mktemp -d)
-# --no-cache would also give the RUN step fresh, empty cache mounts, so a
-# timestamp file busts the step cache instead.
+# --no-cache would also give the RUN step a fresh, empty cache mount, so a
+# timestamp file busts the step cache instead. The cache travels as one tar:
+# exporting its many small files to a local directory stalls BuildKit.
 date +%s%N > "$work/buildstamp"
 
 case "$mode" in
 inject)
-  mkdir -p "$dir/mod" "$dir/build"
+  mkdir -p "$dir"
+  if [ ! -f "$dir/go-build.tar" ]; then
+    echo "no saved Go build cache; starting cold"
+    exit 0
+  fi
   cp "$work/buildstamp" "$dir/buildstamp"
   cat > "$work/Dockerfile" <<DOCKERFILE
 FROM busybox:1
-COPY . /seed
-RUN $mounts cp -a /seed/mod/. /go/pkg/mod/ && cp -a /seed/build/. /root/.cache/go-build/
+COPY buildstamp /buildstamp
+RUN $mount --mount=type=bind,target=/seed tar -xf /seed/go-build.tar -C /root/.cache/go-build
 DOCKERFILE
   docker buildx build --progress=plain -f "$work/Dockerfile" "$dir"
   ;;
@@ -32,15 +38,14 @@ extract)
   cat > "$work/Dockerfile" <<DOCKERFILE
 FROM busybox:1 AS copy
 COPY buildstamp /buildstamp
-RUN $mounts mkdir -p /out && cp -a /go/pkg/mod /out/mod && cp -a /root/.cache/go-build /out/build
+RUN $mount mkdir -p /out && tar -cf /out/go-build.tar -C /root/.cache/go-build .
 FROM scratch
 COPY --from=copy /out /
 DOCKERFILE
-  # Module cache files are read-only; make them removable first.
-  if [ -d "$dir" ]; then chmod -R u+w "$dir"; rm -rf "$dir"; fi
+  rm -rf "$dir"
   docker buildx build --progress=plain -f "$work/Dockerfile" \
     --output "type=local,dest=$dir" "$work"
-  du -sh "$dir"/*
+  ls -lh "$dir"
   ;;
 *)
   echo "usage: $0 inject|extract DIR" >&2
