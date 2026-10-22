@@ -21,26 +21,6 @@ jobs:
       with:
         go-version-file: go.mod
         cache: true
-    - name: cache for linux
-      uses: actions/cache@v3
-      if: runner.os == 'Linux'
-      with:
-        path: |
-          ~/.cache/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
-    - name: cache for macOS
-      uses: actions/cache@v3
-      if: runner.os == 'macOS'
-      with:
-        path: |
-          ~/Library/Caches/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
     - name: download modules
       run: |
         go mod download
@@ -70,30 +50,12 @@ jobs:
       with:
         go-version-file: go.mod
         cache: true
-    - name: cache for linux
-      uses: actions/cache@v3
-      if: runner.os == 'Linux'
-      with:
-        path: |
-          ~/.cache/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
-    - name: cache for macOS
-      uses: actions/cache@v3
-      if: runner.os == 'macOS'
-      with:
-        path: |
-          ~/Library/Caches/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
     - name: download modules
       run: |
         go mod download
     - name: test
       # test/e2e is the Docker-based conformance suite; it runs in its own
       # integration workflow, not in the unit test job.
-      run: go test -v -count=1 $(go list ./... | grep -v '/test/e2e')
+      run: |
+        # shellcheck disable=SC2046 # word splitting of the package list is intended
+        go test -v -count=1 $(go list ./... | grep -v '/test/e2e')
