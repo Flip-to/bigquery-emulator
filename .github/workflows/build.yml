@@ -27,6 +27,19 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Restore Go caches
+        uses: actions/cache@v4
+        id: go-cache
+        with:
+          path: ${{ runner.temp }}/go-cache
+          key: image-go-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            image-go-${{ hashFiles('go.sum') }}-
+            image-go-
+
+      - name: Seed BuildKit Go cache mounts
+        run: .github/scripts/go-cache-mounts.sh inject "${{ runner.temp }}/go-cache"
+
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -48,11 +61,17 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=release-image
+          cache-to: type=gha,mode=max,scope=release-image
           build-args: |
             VERSION=v${{ steps.meta.outputs.version }}
             REVISION=${{ github.sha }}
+
+      # Runs before actions/cache's post step, which saves the directory.
+      # An exact key hit is not re-saved, so skip the copy then.
+      - name: Extract BuildKit Go cache mounts
+        if: steps.go-cache.outputs.cache-hit != 'true'
+        run: .github/scripts/go-cache-mounts.sh extract "${{ runner.temp }}/go-cache"
 
       # SLSA build-provenance attestation, signed by the GitHub Actions
       # OIDC issuer and pushed to GHCR alongside the image manifest.
