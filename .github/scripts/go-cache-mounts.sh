@@ -20,14 +20,14 @@ inject)
   cat > "$work/Dockerfile" <<DOCKERFILE
 FROM busybox:1
 COPY . /seed
-RUN $mounts cp -a /seed/mod/. /go/pkg/mod/ && cp -a /seed/build/. /root/.cache/go-build/
+RUN $mounts cp -a /seed/mod/. /go/pkg/mod/ && cp -a /seed/build/. /root/.cache/go-build/ && du -sh /go/pkg/mod /root/.cache/go-build
 DOCKERFILE
   docker buildx build --no-cache --progress=plain -f "$work/Dockerfile" "$dir"
   ;;
 extract)
   cat > "$work/Dockerfile" <<DOCKERFILE
 FROM busybox:1 AS copy
-RUN $mounts mkdir -p /out && cp -a /go/pkg/mod /out/mod && cp -a /root/.cache/go-build /out/build
+RUN $mounts du -sh /go/pkg/mod /root/.cache/go-build && mkdir -p /out && cp -a /go/pkg/mod /out/mod && cp -a /root/.cache/go-build /out/build
 FROM scratch
 COPY --from=copy /out /
 DOCKERFILE
