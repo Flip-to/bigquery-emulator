@@ -1,0 +1,100 @@
+name: flipto-binaries
+# Builds standalone emulator binaries for linux, darwin and windows
+# (amd64/arm64) with the same .goreleaser.yml the tag release uses.
+#   pull_request / dispatch: archives uploaded as workflow artifacts only.
+#   push to flipto/main:     also refreshes the rolling `flipto` prerelease
+#                            so the latest .exe/.tar.gz has a stable URL:
+#   https://github.com/Flip-to/bigquery-emulator/releases/tag/flipto
+on:
+  push:
+    branches:
+      - flipto/main
+  pull_request:
+    paths:
+      - .github/workflows/flipto-binaries.yml
+      - .goreleaser.yml
+      - go.mod
+      - go.sum
+      - "**.go"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flipto-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Snapshot mode builds every target without needing a tag or
+      # publishing anything. --parallelism 1 for the same reason as
+      # release.yml: one link peaks at ~5.6 GB RSS.
+      - name: Build snapshot with GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --snapshot --clean --skip=publish --parallelism 1
+
+      - name: Smoke-test linux binary
+        run: |
+          bin=$(find dist -type f -path '*linux_amd64*' -name bigquery-emulator | head -1)
+          "$bin" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bigquery-emulator-binaries
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/flipto/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bigquery-emulator-binaries
+          path: dist
+
+      # Snapshot archive names embed the version; rename to stable names so
+      # the release download URLs never change, e.g.
+      #   .../releases/download/flipto/bigquery-emulator_windows_amd64.zip
+      - name: Normalize asset names
+        working-directory: dist
+        run: |
+          for f in bigquery-emulator_*; do
+            platform=$(echo "$f" | sed -E 's/.*_([a-z]+_[a-z0-9]+)\.(tar\.gz|zip)$/\1/')
+            ext=${f#*"${platform}".}
+            mv "$f" "bigquery-emulator_${platform}.${ext}"
+          done
+          sha256sum bigquery-emulator_* > checksums.txt
+          ls -l
+
+      - name: Update rolling flipto prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete flipto --yes --cleanup-tag || true
+          gh release create flipto dist/* \
+            --target "${{ github.sha }}" \
+            --prerelease \
+            --title "flipto (latest flipto/main)" \
+            --notes "Rolling build of flipto/main at ${{ github.sha }}. Replaced on every push."
