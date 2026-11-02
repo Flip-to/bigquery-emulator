@@ -38,7 +38,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
+
+      # setup-go's cache key is go.sum only, so once saved it is never
+      # refreshed and the build cache goes stale. Key on the commit instead
+      # and save only from flipto/main pushes: every run restores the newest
+      # flipto/main cache, PR runs never evict it with their own copies.
+      - name: Restore Go caches
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: binaries-go-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            binaries-go-${{ hashFiles('go.sum') }}-
+            binaries-go-
 
       # Snapshot mode builds every target without needing a tag or
       # publishing anything. --parallelism 1 for the same reason as
@@ -54,6 +69,15 @@ jobs:
         run: |
           bin=$(find dist -type f -path '*linux_amd64*' -name bigquery-emulator | head -1)
           "$bin" --version
+
+      - name: Save Go caches
+        if: github.event_name == 'push' && github.ref == 'refs/heads/flipto/main'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: binaries-go-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
       - uses: actions/upload-artifact@v4
         with:
