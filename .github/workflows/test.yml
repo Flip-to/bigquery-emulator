@@ -20,7 +20,20 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version-file: go.mod
-        cache: true
+        # Linux restores the shared go-linux-* cache below instead.
+        cache: ${{ runner.os != 'Linux' }}
+    # Read-only: flipto-binaries.yml is the only writer of go-linux-*.
+    - name: restore shared Go cache
+      if: runner.os == 'Linux'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: go-linux-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          go-linux-${{ hashFiles('go.sum') }}-
+          go-linux-
     - name: download modules
       run: |
         go mod download
@@ -49,13 +62,28 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version-file: go.mod
-        cache: true
+        cache: ${{ runner.os != 'Linux' }}
+    - name: restore shared Go cache
+      if: runner.os == 'Linux'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: go-linux-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          go-linux-${{ hashFiles('go.sum') }}-
+          go-linux-
     - name: download modules
       run: |
         go mod download
     - name: test
       # test/e2e is the Docker-based conformance suite; it runs in its own
       # integration workflow, not in the unit test job.
+      # CGO_ENABLED=0 matches the release build, so the package objects in
+      # the shared cache are hits rather than a cgo-flavoured rebuild.
+      env:
+        CGO_ENABLED: "0"
       run: |
         # shellcheck disable=SC2046 # word splitting of the package list is intended
         go test -v -count=1 $(go list ./... | grep -v '/test/e2e')

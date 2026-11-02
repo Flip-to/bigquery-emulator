@@ -50,10 +50,10 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: binaries-go-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          key: go-linux-${{ hashFiles('go.sum') }}-${{ github.sha }}
           restore-keys: |
-            binaries-go-${{ hashFiles('go.sum') }}-
-            binaries-go-
+            go-linux-${{ hashFiles('go.sum') }}-
+            go-linux-
 
       # Snapshot mode builds every target without needing a tag or
       # publishing anything. --parallelism 1 for the same reason as
@@ -77,7 +77,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: binaries-go-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          key: go-linux-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
       - uses: actions/upload-artifact@v4
         with:
