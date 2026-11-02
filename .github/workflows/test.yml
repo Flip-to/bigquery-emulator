@@ -20,9 +20,9 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version-file: go.mod
-        # Linux restores the shared go-linux-* cache below instead.
+        # Linux restores the shared go-linux-amd64-* cache below instead.
         cache: ${{ runner.os != 'Linux' }}
-    # Read-only: flipto-binaries.yml is the only writer of go-linux-*.
+    # Read-only: flipto-binaries.yml is the only writer of go-linux-amd64-*.
     - name: restore shared Go cache
       if: runner.os == 'Linux'
       uses: actions/cache/restore@v4
@@ -30,10 +30,10 @@ jobs:
         path: |
           ~/go/pkg/mod
           ~/.cache/go-build
-        key: go-linux-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        key: go-linux-amd64-${{ hashFiles('go.sum') }}-${{ github.sha }}
         restore-keys: |
-          go-linux-${{ hashFiles('go.sum') }}-
-          go-linux-
+          go-linux-amd64-${{ hashFiles('go.sum') }}-
+          go-linux-amd64-
     - name: download modules
       run: |
         go mod download
@@ -70,10 +70,10 @@ jobs:
         path: |
           ~/go/pkg/mod
           ~/.cache/go-build
-        key: go-linux-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        key: go-linux-amd64-${{ hashFiles('go.sum') }}-${{ github.sha }}
         restore-keys: |
-          go-linux-${{ hashFiles('go.sum') }}-
-          go-linux-
+          go-linux-amd64-${{ hashFiles('go.sum') }}-
+          go-linux-amd64-
     - name: download modules
       run: |
         go mod download
