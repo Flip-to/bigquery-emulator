@@ -1,0 +1,157 @@
+name: flipto-binaries
+# Builds standalone emulator binaries for linux, darwin and windows
+# (amd64/arm64), one parallel job per target.
+#   pull_request / dispatch: archives uploaded as workflow artifacts only.
+#   push to flipto/main:     also refreshes the rolling `flipto` prerelease
+#                            so the latest .exe/.tar.gz has a stable URL:
+#   https://github.com/Flip-to/bigquery-emulator/releases/tag/flipto
+#   push of a flipto-v* tag: attaches the archives to that tag's release.
+on:
+  push:
+    branches:
+      - flipto/main
+    tags:
+      - flipto-v*
+  pull_request:
+    paths:
+      - .github/workflows/flipto-binaries.yml
+      - go.mod
+      - go.sum
+      - "**.go"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flipto-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    # One link peaks at ~5.6 GB RSS, so each target gets its own runner
+    # rather than sharing one with --parallelism 1.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # One cache per target, keyed on the commit so it is refreshed on
+      # every flipto/main push (setup-go's go.sum-only key never is).
+      # Only flipto/main pushes save; PRs, tags and the test/integration
+      # workflows restore the newest one read-only, so they never evict it.
+      - name: Restore Go caches
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}-
+            go-${{ matrix.goos }}-${{ matrix.goarch }}-
+
+      # Same flags as `make emulator/build` and .goreleaser.yml.
+      - name: Build
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="flipto-${GITHUB_SHA::7}"
+          fi
+          ext=""
+          [ "$GOOS" = windows ] && ext=".exe"
+          mkdir -p out
+          go build -o "out/bigquery-emulator${ext}" \
+            -ldflags="-s -w -X main.version=${version} -X main.revision=${GITHUB_SHA::7}" \
+            ./cmd/bigquery-emulator
+
+      - name: Smoke-test binary
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: out/bigquery-emulator --version
+
+      - name: Archive
+        run: |
+          cp LICENSE README.md out/
+          name="bigquery-emulator_${GOOS}_${GOARCH}"
+          mkdir -p dist
+          if [ "$GOOS" = windows ]; then
+            (cd out && zip -q "../dist/${name}.zip" ./*)
+          else
+            tar -czf "dist/${name}.tar.gz" -C out .
+          fi
+          ls -l dist
+
+      - name: Save Go caches
+        if: github.event_name == 'push' && github.ref == 'refs/heads/flipto/main'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bigquery-emulator_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bigquery-emulator_*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum bigquery-emulator_* > checksums.txt
+          ls -l
+
+      # flipto-v* tag: attach binaries to that tag's release (created if
+      # missing, existing assets overwritten).
+      - name: Attach to tag release
+        if: startsWith(github.ref, 'refs/tags/flipto-v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+          gh release upload "$TAG" dist/* --clobber
+
+      - name: Update rolling flipto prerelease
+        if: github.ref == 'refs/heads/flipto/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete flipto --yes --cleanup-tag || true
+          gh release create flipto dist/* \
+            --target "${{ github.sha }}" \
+            --prerelease \
+            --title "flipto (latest flipto/main)" \
+            --notes "Rolling build of flipto/main at ${{ github.sha }}. Replaced on every push."
