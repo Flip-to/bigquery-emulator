@@ -4812,3 +4812,102 @@ func TestExportDataStatement(t *testing.T) {
 		}
 	})
 }
+
+func TestDatasetInsertCreatesProject(t *testing.T) {
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.SetProject("test"); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+
+	// A client for a project the server was not started with.
+	client, err := bigquery.NewClient(
+		ctx,
+		"other-project",
+		option.WithEndpoint(testServer.URL),
+		option.WithoutAuthentication(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if _, err := client.Dataset("ds").Metadata(ctx); err == nil {
+		t.Fatal("expected datasets.get on an unknown project to fail")
+	}
+	if err := client.Dataset("ds").Create(ctx, nil); err != nil {
+		t.Fatalf("datasets.insert into an unknown project: %+v", err)
+	}
+	table := client.Dataset("ds").Table("t")
+	if err := table.Create(ctx, &bigquery.TableMetadata{
+		Schema: bigquery.Schema{{Name: "id", Type: bigquery.IntegerFieldType}},
+	}); err != nil {
+		t.Fatalf("tables.insert: %+v", err)
+	}
+	it, err := client.Query("SELECT COUNT(*) FROM `other-project.ds.t`").Read(ctx)
+	if err != nil {
+		t.Fatalf("query: %+v", err)
+	}
+	var row []bigquery.Value
+	if err := it.Next(&row); err != nil {
+		t.Fatal(err)
+	}
+	if row[0] != int64(0) {
+		t.Fatalf("expected 0 rows, got %v", row[0])
+	}
+}
+
+func TestQueryReadsTableInCreatedProject(t *testing.T) {
+	ctx := context.Background()
+	bqServer, err := server.New(server.TempStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bqServer.SetProject("test"); err != nil {
+		t.Fatal(err)
+	}
+	testServer := bqServer.TestServer()
+	defer func() {
+		testServer.Close()
+		bqServer.Stop(ctx)
+	}()
+	newClient := func(project string) *bigquery.Client {
+		c, err := bigquery.NewClient(ctx, project, option.WithEndpoint(testServer.URL), option.WithoutAuthentication())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	other := newClient("other-project")
+	defer other.Close()
+	if err := other.Dataset("ds").Create(ctx, nil); err != nil {
+		t.Fatalf("datasets.insert: %+v", err)
+	}
+	if err := other.Dataset("ds").Table("t").Create(ctx, &bigquery.TableMetadata{
+		Schema: bigquery.Schema{{Name: "id", Type: bigquery.IntegerFieldType}},
+	}); err != nil {
+		t.Fatalf("tables.insert: %+v", err)
+	}
+
+	main := newClient("test")
+	defer main.Close()
+	it, err := main.Query("SELECT COUNT(*) FROM `other-project`.ds.t").Read(ctx)
+	if err != nil {
+		t.Fatalf("cross-project query: %+v", err)
+	}
+	var row []bigquery.Value
+	if err := it.Next(&row); err != nil {
+		t.Fatal(err)
+	}
+	if row[0] != int64(0) {
+		t.Fatalf("expected 0 rows, got %v", row[0])
+	}
+}
