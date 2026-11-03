@@ -2654,14 +2654,19 @@ type routinesListRequest struct {
 }
 
 func (h *routinesListHandler) Handle(ctx context.Context, r *routinesListRequest) (*bigqueryv2.ListRoutinesResponse, error) {
-	var routineList []*bigqueryv2.Routine
+	routineList := []*bigqueryv2.Routine{}
 	for _, routine := range r.dataset.Routines() {
-		_ = routine
-		routineList = append(routineList, &bigqueryv2.Routine{})
+		routineList = append(routineList, &bigqueryv2.Routine{
+			RoutineReference: &bigqueryv2.RoutineReference{
+				ProjectId: routine.ProjectID,
+				DatasetId: routine.DatasetID,
+				RoutineId: routine.ID,
+			},
+		})
 	}
 	return &bigqueryv2.ListRoutinesResponse{
 		Routines: routineList,
-	}, fmt.Errorf("unsupported bigquery.routines.list")
+	}, nil
 }
 
 func (h *routinesUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

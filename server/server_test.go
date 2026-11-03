@@ -1374,6 +1374,19 @@ func TestRoutine(t *testing.T) {
 	}
 
 	routineRef := client.Dataset(datasetID).Routine(routineID)
+	// routines.list, called by dbt-bigquery >= 1.12 on every run, must succeed.
+	// routines.insert does not record routine metadata, so the list is empty here.
+	routines := client.Dataset(datasetID).Routines(ctx)
+	for {
+		_, err := routines.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			t.Fatalf("routines.list: %+v", err)
+		}
+	}
+
 	if err := routineRef.Create(ctx, metaData); err != nil {
 		t.Fatalf("%+v", err)
 	}
