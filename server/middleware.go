@@ -130,6 +130,14 @@ func projectIDFromParams(params map[string]string) (string, bool) {
 	return projectID, exists
 }
 
+// isDatasetsInsert reports whether r is POST /projects/{projectId}/datasets.
+func isDatasetsInsert(r *http.Request, params map[string]string) bool {
+	if _, ok := datasetIDFromParams(params); ok {
+		return false
+	}
+	return r.Method == http.MethodPost && strings.HasSuffix(strings.TrimSuffix(r.URL.Path, "/"), "/datasets")
+}
+
 func datasetIDFromParams(params map[string]string) (string, bool) {
 	datasetID, exists := params["datasetId"]
 	if exists {
@@ -188,6 +196,21 @@ func withProjectMiddleware() func(http.Handler) http.Handler {
 					w.WriteHeader(http.StatusInternalServerError)
 					fmt.Fprintln(w, err)
 					return
+				}
+				if project == nil && isDatasetsInsert(r, params) {
+					// datasets.insert into a project the emulator was not started with
+					// creates it, so a caller can seed tables in more than one project.
+					if err := server.SetProject(projectID); err != nil {
+						w.WriteHeader(http.StatusInternalServerError)
+						fmt.Fprintln(w, err)
+						return
+					}
+					project, err = server.metaRepo.FindProject(ctx, projectID)
+					if err != nil {
+						w.WriteHeader(http.StatusInternalServerError)
+						fmt.Fprintln(w, err)
+						return
+					}
 				}
 				if project == nil {
 					errorResponse(ctx, w, errNotFound(fmt.Sprintf("project %s is not found", projectID)))
