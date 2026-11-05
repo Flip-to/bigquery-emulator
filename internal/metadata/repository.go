@@ -1014,9 +1014,9 @@ func (r *Repository) UpdateRoutine(ctx context.Context, tx *sql.Tx, routine *Rou
 func (r *Repository) DeleteRoutine(ctx context.Context, tx *sql.Tx, routine *Routine) error {
 	if _, err := tx.Exec(
 		"DELETE FROM routines WHERE projectID = @projectID AND datasetID = @datasetID AND id = @id",
-		routine.ProjectID,
-		routine.DatasetID,
-		routine.ID,
+		sql.Named("projectID", routine.ProjectID),
+		sql.Named("datasetID", routine.DatasetID),
+		sql.Named("id", routine.ID),
 	); err != nil {
 		return err
 	}
