@@ -170,3 +170,42 @@ func TestCreateTableClone(t *testing.T) {
 		t.Fatalf("IF NOT EXISTS replaced the table: %s", got)
 	}
 }
+
+// TestDropSchema: DROP SCHEMA [IF EXISTS] [CASCADE] drops the dataset (it was "currently unsupported").
+// Without CASCADE a dataset that holds tables is refused; its name can be used again afterwards.
+func TestDropSchema(t *testing.T) {
+	e := newGapsEnv(t)
+	datasetURL := func(name string) string { return e.url + "/bigquery/v2/projects/test/datasets/" + name }
+	if err := e.exec(t, "CREATE SCHEMA `test`.`env_pr_7`; CREATE VIEW `test`.`env_pr_7`.`v` AS SELECT 1 AS x; CREATE TABLE `test`.`env_pr_7`.`t` (id INT64)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.exec(t, "DROP SCHEMA `test`.`env_pr_7`"); err == nil {
+		t.Fatal("DROP SCHEMA of a dataset with tables must be refused without CASCADE")
+	}
+	if code, _ := httpJSON(t, http.MethodGet, datasetURL("env_pr_7"), "", nil); code != http.StatusOK {
+		t.Fatalf("the refused DROP SCHEMA removed the dataset: %d", code)
+	}
+	if err := e.exec(t, "DROP SCHEMA IF EXISTS `test`.`env_pr_7` CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := httpJSON(t, http.MethodGet, datasetURL("env_pr_7"), "", nil); code != http.StatusNotFound {
+		t.Fatalf("dataset after DROP SCHEMA CASCADE: %d, want 404", code)
+	}
+	if err := e.exec(t, "SELECT * FROM `test`.`env_pr_7`.`t`"); err == nil {
+		t.Fatal("the table of a dropped dataset is still queryable")
+	}
+	// IF EXISTS on a missing dataset is a no-op, without it an error.
+	if err := e.exec(t, "DROP SCHEMA IF EXISTS `test`.`env_pr_7` CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.exec(t, "DROP SCHEMA `test`.`env_pr_7`"); err == nil {
+		t.Fatal("DROP SCHEMA of a missing dataset must fail without IF EXISTS")
+	}
+	// An empty dataset drops without CASCADE, and the name is free for a new dataset with the same table.
+	if err := e.exec(t, "CREATE SCHEMA `test`.`env_pr_8`; DROP SCHEMA `test`.`env_pr_8`"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.exec(t, "CREATE SCHEMA `test`.`env_pr_7`; CREATE TABLE `test`.`env_pr_7`.`t` (id INT64)"); err != nil {
+		t.Fatalf("recreating the dropped dataset: %v", err)
+	}
+}

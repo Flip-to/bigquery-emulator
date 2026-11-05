@@ -1996,7 +1996,11 @@ func syncCatalog(ctx context.Context, server *Server, defaultProjectID string, c
 	if err := updateTableSchemas(ctx, server, cat.Table.Updated); err != nil {
 		return err
 	}
-	return syncRoutines(ctx, server, cat)
+	if err := syncRoutines(ctx, server, cat); err != nil {
+		return err
+	}
+	// Dropped schemas last, so the statements of the same script that touch their tables are applied first.
+	return dropSchemas(ctx, server, defaultProjectID, cat.Schema.Dropped)
 }
 
 func addTableMetadata(ctx context.Context, server *Server, spec *googlesqlite.TableSpec) error {
