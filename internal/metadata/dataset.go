@@ -181,6 +181,55 @@ func (d *Dataset) DeleteTable(ctx context.Context, tx *sql.Tx, id string) error 
 	return d.repo.UpdateDataset(ctx, tx, d)
 }
 
+// AddRoutine records the routine in this dataset and in the repository.
+func (d *Dataset) AddRoutine(ctx context.Context, tx *sql.Tx, routine *Routine) error {
+	d.mu.Lock()
+	if _, exists := d.routineMap[routine.ID]; exists {
+		d.mu.Unlock()
+		return fmt.Errorf("routine %s: %w", routine.ID, ErrDuplicatedRoutine)
+	}
+	if err := d.repo.AddRoutine(ctx, tx, routine); err != nil {
+		d.mu.Unlock()
+		return err
+	}
+	d.routines = append(d.routines, routine)
+	if d.routineMap == nil {
+		d.routineMap = map[string]*Routine{}
+	}
+	d.routineMap[routine.ID] = routine
+	d.mu.Unlock()
+
+	// UpdateDataset reads RoutineIDs, which takes d.mu.
+	return d.repo.UpdateDataset(ctx, tx, d)
+}
+
+// DeleteRoutine removes the routine metadata for id, both from the
+// repository and from this dataset's in-memory routine list.
+func (d *Dataset) DeleteRoutine(ctx context.Context, tx *sql.Tx, id string) error {
+	d.mu.Lock()
+	routine, exists := d.routineMap[id]
+	if !exists {
+		d.mu.Unlock()
+		return fmt.Errorf("routine '%s' is not found in dataset '%s'", id, d.ID)
+	}
+	if err := d.repo.DeleteRoutine(ctx, tx, routine); err != nil {
+		d.mu.Unlock()
+		return err
+	}
+	newRoutines := make([]*Routine, 0, len(d.routines))
+	for _, r := range d.routines {
+		if r.ID == id {
+			continue
+		}
+		newRoutines = append(newRoutines, r)
+	}
+	d.routines = newRoutines
+	delete(d.routineMap, id)
+	d.mu.Unlock()
+
+	return d.repo.UpdateDataset(ctx, tx, d)
+}
+
 func (d *Dataset) Table(id string) *Table {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

@@ -1915,7 +1915,7 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 			return nil, fmt.Errorf("failed to commit job: %w", err)
 		}
 		if response != nil && response.ChangedCatalog.Changed() {
-			if err := syncCatalog(ctx, r.server, response.ChangedCatalog); err != nil {
+			if err := syncCatalog(ctx, r.server, r.project.ID, response.ChangedCatalog); err != nil {
 				return nil, err
 			}
 		}
@@ -1936,7 +1936,11 @@ func queryProjectAndDataset(defaultDataset *bigqueryv2.DatasetReference, fallbac
 	return projectID, datasetID
 }
 
-func syncCatalog(ctx context.Context, server *Server, cat *googlesqlite.ChangedCatalog) error {
+func syncCatalog(ctx context.Context, server *Server, defaultProjectID string, cat *googlesqlite.ChangedCatalog) error {
+	// Datasets first: a script may create a dataset and objects in it.
+	if err := syncSchemas(ctx, server, defaultProjectID, cat.Schema.Added); err != nil {
+		return err
+	}
 	// Temp tables live only for the script that created them and belong to
 	// no dataset (their name path is [project, table]), so they have no
 	// dataset metadata to add or remove.
@@ -1956,7 +1960,10 @@ func syncCatalog(ctx context.Context, server *Server, cat *googlesqlite.ChangedC
 			return err
 		}
 	}
-	return nil
+	if err := updateTableSchemas(ctx, server, cat.Table.Updated); err != nil {
+		return err
+	}
+	return syncRoutines(ctx, server, cat)
 }
 
 func addTableMetadata(ctx context.Context, server *Server, spec *googlesqlite.TableSpec) error {
@@ -2297,7 +2304,7 @@ func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*in
 			return nil, err
 		}
 		if response.ChangedCatalog.Changed() {
-			if err := syncCatalog(ctx, r.server, response.ChangedCatalog); err != nil {
+			if err := syncCatalog(ctx, r.server, r.project.ID, response.ChangedCatalog); err != nil {
 				return nil, err
 			}
 		}
@@ -2578,7 +2585,7 @@ type routinesGetRequest struct {
 }
 
 func (h *routinesGetHandler) Handle(ctx context.Context, r *routinesGetRequest) (*bigqueryv2.Routine, error) {
-	return nil, fmt.Errorf("unsupported bigquery.routines.get")
+	return r.routine.Content()
 }
 
 func (h *routinesInsertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -2627,6 +2634,11 @@ func (h *routinesInsertHandler) Handle(ctx context.Context, r *routinesInsertReq
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	// Record the routine so routines.get and routines.list find it.
+	ref := r.routine.RoutineReference
+	if err := recordRoutine(ctx, r.server, ref.ProjectId, ref.DatasetId, ref.RoutineId, r.routine); err != nil {
+		return nil, err
+	}
 	return r.routine, nil
 }
 
@@ -2656,13 +2668,18 @@ type routinesListRequest struct {
 func (h *routinesListHandler) Handle(ctx context.Context, r *routinesListRequest) (*bigqueryv2.ListRoutinesResponse, error) {
 	routineList := []*bigqueryv2.Routine{}
 	for _, routine := range r.dataset.Routines() {
-		routineList = append(routineList, &bigqueryv2.Routine{
-			RoutineReference: &bigqueryv2.RoutineReference{
+		content, err := routine.Content()
+		if err != nil {
+			return nil, err
+		}
+		if content.RoutineReference == nil {
+			content.RoutineReference = &bigqueryv2.RoutineReference{
 				ProjectId: routine.ProjectID,
 				DatasetId: routine.DatasetID,
 				RoutineId: routine.ID,
-			},
-		})
+			}
+		}
+		routineList = append(routineList, content)
 	}
 	return &bigqueryv2.ListRoutinesResponse{
 		Routines: routineList,
