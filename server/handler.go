@@ -2002,6 +2002,7 @@ func addTableMetadata(ctx context.Context, server *Server, spec *googlesqlite.Ta
 		},
 		Schema: &bigqueryv2.TableSchema{Fields: fields},
 	}
+	applyTableLayout(table, spec)
 	// A view created by a CREATE VIEW DDL statement must be recorded as a
 	// view so it is typed correctly and dropped with DROP VIEW.
 	if spec.IsView {
