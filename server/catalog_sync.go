@@ -39,6 +39,45 @@ func syncSchemas(ctx context.Context, server *Server, defaultProjectID string, s
 	return nil
 }
 
+// dropSchemas applies DROP SCHEMA [IF EXISTS] [CASCADE]: the dataset goes (with its tables for CASCADE;
+// without it a dataset that still holds tables is "in use", as in BigQuery).
+func dropSchemas(ctx context.Context, server *Server, defaultProjectID string, schemas []*googlesqlite.DroppedSchema) error {
+	for _, spec := range schemas {
+		projectID, datasetID := defaultProjectID, ""
+		switch len(spec.NamePath) {
+		case 1:
+			datasetID = spec.NamePath[0]
+		case 2:
+			projectID, datasetID = spec.NamePath[0], spec.NamePath[1]
+		default:
+			return fmt.Errorf("unexpected schema name path: %v", spec.NamePath)
+		}
+		project, err := server.metaRepo.FindProject(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		var dataset *metadata.Dataset
+		if project != nil {
+			dataset = project.Dataset(datasetID)
+		}
+		if dataset == nil {
+			if spec.IfExists {
+				continue
+			}
+			return errNotFound(fmt.Sprintf("Not found: Dataset %s:%s", projectID, datasetID))
+		}
+		if err := (&datasetsDeleteHandler{}).Handle(ctx, &datasetsDeleteRequest{
+			server:         server,
+			project:        project,
+			dataset:        dataset,
+			deleteContents: spec.Cascade,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func createDatasetFromSchema(ctx context.Context, server *Server, projectID, datasetID string, spec *googlesqlite.SchemaSpec) error {
 	project, err := server.metaRepo.FindProject(ctx, projectID)
 	if err != nil {

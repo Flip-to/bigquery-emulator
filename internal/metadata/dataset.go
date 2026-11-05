@@ -61,6 +61,11 @@ func (d *Dataset) Content() *bigqueryv2.Dataset {
 }
 
 func (d *Dataset) UpdateContentIfExists(newContent *bigqueryv2.Dataset) {
+	// datasets.patch replaces the access list when the request carries one (authorized
+	// datasets/views are added this way); an absent list leaves it alone.
+	if newContent.Access != nil {
+		d.content.Access = newContent.Access
+	}
 	if newContent.Description != "" {
 		d.content.Description = newContent.Description
 	}
@@ -98,6 +103,23 @@ func (d *Dataset) UpdateContentIfExists(newContent *bigqueryv2.Dataset) {
 
 func (d *Dataset) UpdateContent(newContent *bigqueryv2.Dataset) {
 	d.content = newContent
+}
+
+// Patch applies a datasets.patch body and stores the dataset. Without the store a later request
+// loads the dataset again and does not see the change.
+func (d *Dataset) Patch(ctx context.Context, tx *sql.Tx, newContent *bigqueryv2.Dataset) error {
+	d.mu.Lock()
+	d.UpdateContentIfExists(newContent)
+	d.mu.Unlock()
+	return d.repo.UpdateDataset(ctx, tx, d)
+}
+
+// Replace applies a datasets.update body and stores the dataset.
+func (d *Dataset) Replace(ctx context.Context, tx *sql.Tx, newContent *bigqueryv2.Dataset) error {
+	d.mu.Lock()
+	d.UpdateContent(newContent)
+	d.mu.Unlock()
+	return d.repo.UpdateDataset(ctx, tx, d)
 }
 
 func (d *Dataset) Insert(ctx context.Context, tx *sql.Tx) error {
