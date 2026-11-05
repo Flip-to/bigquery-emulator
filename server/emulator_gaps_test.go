@@ -286,3 +286,36 @@ func TestInformationSchemaTablesCreationTimeIsTimestamp(t *testing.T) {
 		t.Fatalf("creation_time = %v", created)
 	}
 }
+
+// TestInformationSchemaPartitionsPerPartition: a PARTITION BY table reports one
+// INFORMATION_SCHEMA.PARTITIONS row per partition, the shape dbt-virtual's
+// partition-coverage check reads.
+func TestInformationSchemaPartitionsPerPartition(t *testing.T) {
+	e := newGapsEnv(t)
+	for _, q := range []string{
+		"CREATE TABLE `test`.`dataset1`.`cov_cand` (d DATE, v INT64) PARTITION BY d",
+		"INSERT INTO `test`.`dataset1`.`cov_cand` VALUES (DATE '2026-10-01', 1)",
+		"CREATE TABLE `test`.`dataset1`.`cov_base` (d DATE, v INT64) PARTITION BY d",
+		"INSERT INTO `test`.`dataset1`.`cov_base` VALUES (DATE '2026-10-01', 1), (DATE '2026-10-02', 2), (NULL, 3)",
+		"CREATE TABLE `test`.`dataset1`.`cov_plain` (id INT64)",
+		"INSERT INTO `test`.`dataset1`.`cov_plain` VALUES (1)",
+	} {
+		if err := e.exec(t, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	rows := e.mustRows(t, "SELECT table_name, partition_id, total_rows FROM `test`.`dataset1`.INFORMATION_SCHEMA.PARTITIONS WHERE table_name LIKE 'cov_%' ORDER BY table_name, partition_id")
+	want := [][]bigquery.Value{
+		{"cov_base", "20261001", int64(1)}, {"cov_base", "20261002", int64(1)}, {"cov_base", "__NULL__", int64(1)},
+		{"cov_cand", "20261001", int64(1)}, {"cov_plain", nil, int64(1)},
+	}
+	if fmt.Sprint(rows) != fmt.Sprint(want) {
+		t.Fatalf("PARTITIONS = %v, want %v", rows, want)
+	}
+	rows = e.mustRows(t, "SELECT b.partition_id FROM `test`.`dataset1`.INFORMATION_SCHEMA.PARTITIONS b "+
+		"LEFT JOIN `test`.`dataset1`.INFORMATION_SCHEMA.PARTITIONS c ON c.table_name = 'cov_cand' AND c.partition_id = b.partition_id "+
+		"WHERE b.table_name = 'cov_base' AND b.partition_id != '__NULL__' AND c.partition_id IS NULL")
+	if fmt.Sprint(rows) != "[[20261002]]" {
+		t.Fatalf("missing partitions = %v", rows)
+	}
+}
