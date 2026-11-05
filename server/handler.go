@@ -1088,9 +1088,22 @@ type datasetsPatchRequest struct {
 }
 
 func (h *datasetsPatchHandler) Handle(ctx context.Context, r *datasetsPatchRequest) (*bigqueryv2.Dataset, error) {
-	r.dataset.UpdateContentIfExists(r.newDataset)
-	newContent := *r.dataset.Content()
-	return &newContent, nil
+	conn, err := r.server.connMgr.Connection(ctx, r.project.ID, r.dataset.ID)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.RollbackIfNotCommitted()
+	if err := r.dataset.Patch(ctx, tx.Tx(), r.newDataset); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return datasetResource(r.project, r.dataset), nil
 }
 
 func (h *datasetsUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1124,9 +1137,29 @@ type datasetsUpdateRequest struct {
 }
 
 func (h *datasetsUpdateHandler) Handle(ctx context.Context, r *datasetsUpdateRequest) (*bigqueryv2.Dataset, error) {
-	r.dataset.UpdateContent(r.newDataset)
-	newContent := *r.dataset.Content()
-	return &newContent, nil
+	conn, err := r.server.connMgr.Connection(ctx, r.project.ID, r.dataset.ID)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.RollbackIfNotCommitted()
+	if err := r.dataset.Replace(ctx, tx.Tx(), r.newDataset); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return datasetResource(r.project, r.dataset), nil
+}
+
+// datasetResource is the dataset as datasets.get returns it: its content with the reference filled in.
+func datasetResource(project *metadata.Project, dataset *metadata.Dataset) *bigqueryv2.Dataset {
+	content := *dataset.Content()
+	content.DatasetReference = &bigqueryv2.DatasetReference{ProjectId: project.ID, DatasetId: dataset.ID}
+	return &content
 }
 
 func (h *jobsCancelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1963,7 +1996,11 @@ func syncCatalog(ctx context.Context, server *Server, defaultProjectID string, c
 	if err := updateTableSchemas(ctx, server, cat.Table.Updated); err != nil {
 		return err
 	}
-	return syncRoutines(ctx, server, cat)
+	if err := syncRoutines(ctx, server, cat); err != nil {
+		return err
+	}
+	// Dropped schemas last, so the statements of the same script that touch their tables are applied first.
+	return dropSchemas(ctx, server, defaultProjectID, cat.Schema.Dropped)
 }
 
 func addTableMetadata(ctx context.Context, server *Server, spec *googlesqlite.TableSpec) error {
@@ -2006,6 +2043,16 @@ func addTableMetadata(ctx context.Context, server *Server, spec *googlesqlite.Ta
 	// view so it is typed correctly and dropped with DROP VIEW.
 	if spec.IsView {
 		table.View = &bigqueryv2.ViewDefinition{Query: spec.Query}
+	}
+	// OPTIONS(description, friendly_name, labels) of the DDL statement are table metadata.
+	if description, ok := spec.Option("description"); ok {
+		table.Description = description
+	}
+	if friendlyName, ok := spec.Option("friendly_name"); ok {
+		table.FriendlyName = friendlyName
+	}
+	if labels := spec.Labels(); len(labels) > 0 {
+		table.Labels = labels
 	}
 	// googlesqlite reports CREATE OR REPLACE of an existing table as an
 	// added table, so replace any metadata already recorded for it.
