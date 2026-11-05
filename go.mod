@@ -157,4 +157,4 @@ require (
 	modernc.org/quickjs v0.18.2 // indirect
 )
 
-replace github.com/goccy/googlesqlite => github.com/Flip-to/googlesqlite v0.3.2-0.20261105135006-fb9c07eee362
+replace github.com/goccy/googlesqlite => github.com/Flip-to/googlesqlite v0.3.2-0.20261105173737-b408723af5c6
