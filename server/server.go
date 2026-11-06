@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -33,6 +34,10 @@ type Server struct {
 	httpServer     *http.Server
 	grpcServer     *grpc.Server
 	listenCallback func(httpAddr, grpcAddr string)
+	// seqMu serializes request handling (see sequentialAccessMiddleware).
+	seqMu sync.Mutex
+	// running holds the query jobs jobs.insert accepted and has not finished.
+	running runningJobs
 }
 
 // SetListenCallback registers a function invoked once the HTTP and gRPC
@@ -96,7 +101,8 @@ func New(storage Storage) (*Server, error) {
 	r.Handle(uploadAPIEndpoint, &uploadHandler{}).Methods("POST")
 	r.Handle(uploadAPIEndpoint, &uploadContentHandler{}).Methods("PUT")
 	r.PathPrefix("/").Handler(&defaultHandler{})
-	r.Use(sequentialAccessMiddleware())
+	r.Use(runningJobMiddleware(server))
+	r.Use(sequentialAccessMiddleware(server))
 	r.Use(recoveryMiddleware(server))
 	r.Use(loggerMiddleware(server))
 	r.Use(accessLogMiddleware())

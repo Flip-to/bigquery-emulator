@@ -110,6 +110,7 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 | IS [NOT] TRUE / FALSE never NULL | googlesqlite | third-party goccy/googlesqlite#71 (carried as is) |
 | FLOAT64 text rendering (CAST, CONCAT, FORMAT, TO_JSON_STRING) | googlesqlite | third-party goccy/googlesqlite#58 (carried as is) |
 | the HTTP server no longer fails queued requests with `read tcp ...: i/o timeout` (400 on jobs.insert / jobs.query with several concurrent dbt runs, Flip-to/dbt-virtual#34): requests are serialized by a mutex and `ReadTimeout` (15 s) / `WriteTimeout` (5 min) count from connection accept, so a request that waited in the queue could no longer read its body; now only `ReadHeaderTimeout` (15 s) is set. Regression test `TestQueuedRequestSurvivesReadDeadline` (`server/read_timeout_internal_test.go`) | emulator | none |
+| query jobs created by jobs.insert run in the background (state RUNNING when the query outlives 5 s) and inserting an existing job ID is BigQuery's 409 `duplicate` / `ALREADY_EXISTS` (`Already Exists: Job <project>:<location>.<id>`) instead of 400 `failed to add job`. The Python client retries a timed-out jobs.insert with the same job ID and recovers from the 409 through jobs.get; jobs.get, jobs.getQueryResults (`timeoutMs`, then `jobComplete=false`) and a repeated insert of a running job are answered without waiting for the query. Regression tests in `server/jobs_async_internal_test.go` | emulator | none |
 
 ## Keeping the fork current
 
