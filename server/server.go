@@ -35,10 +35,15 @@ type Server struct {
 	httpServer     *http.Server
 	grpcServer     *grpc.Server
 	listenCallback func(httpAddr, grpcAddr string)
+	// accessMu is the request lock (see accessLockMiddleware).
+	accessMu sync.RWMutex
+	// running holds the query jobs jobs.insert accepted and has not finished.
+	running runningJobs
 	// walMode is set when the database file runs in SQLite WAL mode, where
 	// one writer can commit while readers are open. A read-only query job
 	// then records itself under jobWriteMu while still holding the shared
-	// lock; without WAL it must promote to the exclusive lock.
+	// lock. Without WAL (in-memory databases) every request is exclusive;
+	// see accessLockMiddleware.
 	walMode    bool
 	jobWriteMu sync.Mutex
 }
@@ -109,7 +114,8 @@ func New(storage Storage) (*Server, error) {
 	r.Handle(uploadAPIEndpoint, &uploadHandler{}).Methods("POST")
 	r.Handle(uploadAPIEndpoint, &uploadContentHandler{}).Methods("PUT")
 	r.PathPrefix("/").Handler(&defaultHandler{})
-	r.Use(accessLockMiddleware())
+	r.Use(runningJobMiddleware(server))
+	r.Use(accessLockMiddleware(server))
 	r.Use(recoveryMiddleware(server))
 	r.Use(loggerMiddleware(server))
 	r.Use(accessLogMiddleware())
@@ -253,12 +259,19 @@ func (s *Server) Load(sources ...Source) error {
 	return nil
 }
 
+// readHeaderTimeout is a variable so tests can shrink it.
+var readHeaderTimeout = 15 * time.Second
+
 func (s *Server) Serve(ctx context.Context, httpAddr, grpcAddr string) error {
+	// Requests are serialized by sequentialAccessMiddleware, so a request can
+	// wait a long time for its turn after the connection was accepted.
+	// ReadTimeout/WriteTimeout count from accept and would fail queued
+	// requests (and long queries) with i/o timeouts; only bound the time a
+	// client may take to send the request headers.
 	httpServer := &http.Server{
-		Handler:      s.Handler,
-		Addr:         httpAddr,
-		WriteTimeout: 5 * time.Minute,
-		ReadTimeout:  15 * time.Second,
+		Handler:           s.Handler,
+		Addr:              httpAddr,
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
 	s.httpServer = httpServer
 

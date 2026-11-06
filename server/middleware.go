@@ -1,19 +1,17 @@
 package server
 
 import (
-	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/gorilla/mux"
+	bigqueryv2 "google.golang.org/api/bigquery/v2"
 	"go.uber.org/zap"
 
 	"github.com/goccy/bigquery-emulator/internal/logger"
@@ -100,16 +98,26 @@ func (g *accessGuard) promote() bool {
 	return true
 }
 
+// releaseSequentialAccess releases the lock of the request in ctx, if it
+// holds one. jobs.insert calls it once it has handed its query to a
+// background run, which takes the lock itself (see startQueryJob).
+func releaseSequentialAccess(ctx context.Context) {
+	if g, ok := ctx.Value(accessGuardKey{}).(*accessGuard); ok {
+		g.release()
+	}
+}
+
 // accessLockMiddleware replaces the former single global mutex with a
-// read/write lock. SQLite runs in shared-cache mode, where a connection
-// that writes a table makes concurrent readers of it fail with
-// SQLITE_LOCKED instead of waiting, so every request that writes must run
-// alone; requests that only read run concurrently. Everything else the
-// requests share is safe for concurrent use: the googlesqlite catalog and
-// the googlesql wasm module serialize themselves, every pooled connection
-// has its own analyzer, and the metadata job cache has its own mutex.
-func accessLockMiddleware() func(http.Handler) http.Handler {
-	var mu sync.RWMutex
+// read/write lock. Requests that only read run concurrently; every request
+// that writes (DDL, DML, loads, inserts, patches, deletes, or anything not
+// known to be read-only) runs alone. The on-disk database is in WAL mode
+// (see withConcurrencyPragmas), so readers never see a half-written state
+// and a read-only query job can record itself beside other readers (see
+// reopenForWrite). Everything else the requests share is safe for
+// concurrent use: the googlesqlite catalog and the googlesql wasm module
+// serialize themselves, every pooled connection has its own analyzer and
+// its own SQLite instance, and the metadata job cache has its own mutex.
+func accessLockMiddleware(s *Server) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mode, err := classifyAccess(r)
@@ -117,7 +125,15 @@ func accessLockMiddleware() func(http.Handler) http.Handler {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			g := &accessGuard{mu: &mu}
+			if !s.walMode {
+				// Without WAL (an in-memory database) nothing runs
+				// concurrently: the SQLite driver has no shared cache, so
+				// every pooled connection to file::memory: is a separate,
+				// empty database, and a second connection only stays out of
+				// the pool while requests run one at a time.
+				mode = accessExclusive
+			}
+			g := &accessGuard{mu: &s.accessMu}
 			g.acquire(mode)
 			defer g.release()
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), accessGuardKey{}, g)))
@@ -152,28 +168,14 @@ func classifyAccess(r *http.Request) (accessMode, error) {
 	return accessExclusive, nil
 }
 
-// readRequestBody reads the whole body, gunzipping it, and replaces it
-// with the decoded bytes so the handler reads the same content.
-func readRequestBody(r *http.Request) ([]byte, error) {
-	var reader io.Reader = r.Body
-	if r.Header.Get(contentEncoding) == encodingTypeGzip {
-		gz, err := gzip.NewReader(r.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode gzip content: %s", err)
-		}
-		defer gz.Close()
-		reader = gz
-		r.Header.Del(contentEncoding)
+// sharedJob reports whether a query job runs one read-only SELECT with no
+// destination table; see sharedQuery.
+func sharedJob(job *bigqueryv2.Job) bool {
+	if job == nil || job.Configuration == nil || job.Configuration.Query == nil {
+		return false
 	}
-	body, err := io.ReadAll(reader)
-	// A gzip body flushed but not closed delivers all its content yet ends
-	// with ErrUnexpectedEOF; the handler's json.Unmarshal validates it.
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return nil, err
-	}
-	_ = r.Body.Close()
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return body, nil
+	q := job.Configuration.Query
+	return q.DestinationTable == nil && strings.TrimSpace(q.Query) != "" && statementType(q.Query) == "SELECT"
 }
 
 // sharedQuery reports whether a jobs.insert (isJobsInsert) or jobs.query
