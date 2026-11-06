@@ -54,6 +54,27 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 (for example Go's `lib/time/zoneinfo.zip` unzipped to `C:\tmp\zoneinfo`, then
 `TZDIR=/tmp/zoneinfo`); without it the analyzer fails to initialize.
 
+## Where does the time go (request timing logs)
+
+The default log level is `error`, so nothing is logged per request. Start with
+`--log-level=info` (add `--log-format=json` for one JSON object per line) to get
+one access line per request, written after the handler returns:
+
+```
+{"L":"INFO","M":"POST /bigquery/v2/projects/test/queries","method":"POST","path":"/bigquery/v2/projects/test/queries","query":"","status":200,"bytes":207,"duration_ms":20.88,"lock_wait_ms":0,"handler_ms":20.88}
+```
+
+- `duration_ms`: total time from arrival to the end of the handler;
+- `lock_wait_ms`: time spent waiting for the global sequential lock (queueing
+  behind other requests); `handler_ms` is the rest, the time holding the lock;
+- `status`, `bytes`: HTTP status and response body size.
+
+With `--log-level=debug`, jobs.query and jobs.insert (query jobs) add one more
+line per job with the phase timings (`prepare_ms`, `execute_ms` = analyze +
+run, `result_write_ms` (destination table, jobs.insert only), `job_write_ms`,
+`commit_ms`, `catalog_sync_ms`, `format_ms`), the job ID and the first 80
+characters of the SQL.
+
 ## Carried changes
 
 | change | repo | upstream |
@@ -62,6 +83,7 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 | memory stays bounded over long runs (flipto-dbt harness: 27 MiB fresh, 895 MiB after 6,136 jobs.query requests): the growth was the driver's wasm heap (every parsed statement's AST stayed in a long-lived arena, fixed in googlesqlite); on the emulator side the recent-jobs cache is now also bounded by the encoded size of the cached jobs (64 MiB), not only by count, so large results of old jobs are evicted from memory and read back from the jobs table on demand. Regression tests `TestQueryMemoryStaysBounded` (3,500 varied jobs.query requests; jobs.get and getQueryResults of the last job) and `TestCurrentTimeStableThroughJobsQuery` (one current time per statement, the harness probe current_ts_stable) need the googlesqlite bump that carries the driver fix | emulator, driver | none |
 | a job whose transaction rolls back (or fails to commit) no longer stays in the recent-jobs cache: jobs enter the cache only on commit, so a client retry with the same job ID is not rejected as "job ... is already created"; server-generated job IDs use the runtime-seeded math/rand/v2 source instead of a time^pid seed identical to the Go client's, which made the first jobs.query ID collide with a client jobs.insert ID in-process (flaky TestAnonymousColumnNames) | emulator | none |
 | per-request cost no longer grows with the job history: the project is loaded without its jobs, and recent jobs are served from a bounded cache instead of a full scan of the jobs table (flipto-dbt L12: SELECT 1 went from 0.25 s to 6 s after ~1,750 queries) | emulator | none |
+| per-request access log (method, path, status, bytes, duration, wait for the global lock) at `--log-level=info`, and per-phase timings of query jobs at `--log-level=debug`; was a method+path line before the handler ran. Test `TestRequestTimingLogs` | emulator | none |
 | googlesqlite bumped to Flip-to/googlesqlite 249671c: single-reference CTEs too costly to inline are materialized, so wide CASE chains no longer exhaust the 256 MiB wasm SQLite heap (`sqlite3: out of memory` on the flipto-dbt snowplow sessions / page_views models) (Flip-to/googlesqlite#31) | driver | goccy/googlesqlite#111 |
 | googlesqlite bumped to Flip-to/googlesqlite e3fc9a7: MERGE accepts a subquery in USING (dbt-bigquery incrementals and the snowplow_unified manifest update failed with `MERGE: source must be a single-table reference`) (Flip-to/googlesqlite#29) | driver | goccy/googlesqlite#110 |
 | googlesqlite bumped to Flip-to/googlesqlite 185ee0f: long compound SELECT chains (210+ UNION ALL arms) are nested so wasm SQLite no longer overflows its stack; 1000 arms per side run in 0.45 s, was 600+ s and an error (Flip-to/googlesqlite#26) | driver | goccy/googlesqlite#109 |

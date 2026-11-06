@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
@@ -33,9 +34,11 @@ func sequentialAccessMiddleware() func(http.Handler) http.Handler {
 	var mu sync.Mutex
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			timing := &requestTiming{arrived: time.Now()}
 			mu.Lock()
 			defer mu.Unlock()
-			next.ServeHTTP(w, r)
+			timing.acquired = time.Now()
+			next.ServeHTTP(w, r.WithContext(withRequestTiming(r.Context(), timing)))
 		})
 	}
 }
@@ -76,11 +79,31 @@ func loggerMiddleware(s *Server) func(http.Handler) http.Handler {
 func accessLogMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rec := &statusRecorder{ResponseWriter: w}
+			next.ServeHTTP(rec, r)
+			end := time.Now()
+			status := rec.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			// Without the sequential middleware in front there is no lock to
+			// wait for: the request started when this middleware did.
+			arrived, lockWait := start, time.Duration(0)
+			if t := requestTimingFromContext(r.Context()); t != nil {
+				arrived, lockWait = t.arrived, t.acquired.Sub(t.arrived)
+			}
 			logger.Logger(r.Context()).Info(
 				fmt.Sprintf("%s %s", r.Method, r.URL.Path),
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
 				zap.String("query", r.URL.RawQuery),
+				zap.Int("status", status),
+				zap.Int64("bytes", rec.bytes),
+				zap.Float64("duration_ms", ms(end.Sub(arrived))),
+				zap.Float64("lock_wait_ms", ms(lockWait)),
+				zap.Float64("handler_ms", ms(end.Sub(start))),
 			)
-			next.ServeHTTP(w, r)
 		})
 	}
 }
