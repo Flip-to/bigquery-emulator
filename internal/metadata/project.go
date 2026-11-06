@@ -8,6 +8,8 @@ import (
 	"sync"
 )
 
+// ErrDuplicatedJob is wrapped by AddJob when the job ID is in use.
+var ErrDuplicatedJob = errors.New("job already exists")
 var ErrDuplicatedDataset = errors.New("dataset is already created")
 
 // Project holds a project's datasets. Jobs are not loaded with the project:
@@ -140,12 +142,12 @@ func (p *Project) AddJob(ctx context.Context, tx *sql.Tx, job *Job) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if _, exists := p.jobMap[job.ID]; exists {
-		return fmt.Errorf("job %s is already created", job.ID)
+		return fmt.Errorf("job %s is already created: %w", job.ID, ErrDuplicatedJob)
 	}
 	// A job already in the table is rejected by the jobs primary key; a
 	// lookup here would scan the whole table (see jobCache).
 	if p.repo.jobs.get(p.ID, job.ID) != nil {
-		return fmt.Errorf("job %s is already created", job.ID)
+		return fmt.Errorf("job %s is already created: %w", job.ID, ErrDuplicatedJob)
 	}
 	if err := job.Insert(ctx, tx); err != nil {
 		return err
