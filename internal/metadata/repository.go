@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS routines (
 type Repository struct {
 	db   *sql.DB
 	jobs *jobCache
+	rows *rowCache
 }
 
 func NewRepository(db *sql.DB) (*Repository, error) {
@@ -86,6 +87,7 @@ func NewRepository(db *sql.DB) (*Repository, error) {
 	return &Repository{
 		db:   db,
 		jobs: newJobCache(),
+		rows: newRowCache(),
 	}, nil
 }
 
@@ -152,7 +154,8 @@ func (r *Repository) RoutineFromData(projectID, datasetID string, data *types.Ro
 }
 
 func (r *Repository) FindProjectWithConn(ctx context.Context, tx *sql.Tx, id string) (*Project, error) {
-	projects, err := r.findProjects(ctx, tx, []string{id})
+	// tx may hold uncommitted metadata writes: read it directly, uncached.
+	projects, err := r.findProjects(ctx, tx, nil, []string{id})
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +168,8 @@ func (r *Repository) FindProjectWithConn(ctx context.Context, tx *sql.Tx, id str
 	return projects[0], nil
 }
 
+// FindProject loads a project with its datasets, tables, models and
+// routines. It runs on every request, so it reads through the row cache.
 func (r *Repository) FindProject(ctx context.Context, id string) (*Project, error) {
 	conn, err := r.getConnection(ctx)
 	if err != nil {
@@ -176,7 +181,7 @@ func (r *Repository) FindProject(ctx context.Context, id string) (*Project, erro
 		return nil, err
 	}
 	defer tx.Commit()
-	projects, err := r.findProjects(ctx, tx, []string{id})
+	projects, err := r.findProjects(ctx, tx, r.rows, []string{id})
 	if err != nil {
 		return nil, err
 	}
@@ -189,28 +194,23 @@ func (r *Repository) FindProject(ctx context.Context, id string) (*Project, erro
 	return projects[0], nil
 }
 
-func (r *Repository) findProjects(ctx context.Context, tx *sql.Tx, ids []string) ([]*Project, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT id, datasetIDs, jobIDs FROM projects WHERE id IN UNNEST(@ids)", ids)
+func (r *Repository) findProjects(ctx context.Context, tx *sql.Tx, cache *rowCache, ids []string) ([]*Project, error) {
+	// jobIDs is a legacy column: jobs are looked up on demand (see Project).
+	rows, err := selectRows(ctx, tx, cache, 2, "SELECT id, datasetIDs FROM projects WHERE id IN UNNEST(@ids)", ids)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get projects: %w", err)
 	}
-	defer rows.Close()
 	projects := []*Project{}
-	for rows.Next() {
-		var (
-			projectID  string
-			datasetIDs []interface{}
-			jobIDs     []interface{}
-		)
-		if err := rows.Scan(&projectID, &datasetIDs, &jobIDs); err != nil {
-			return nil, err
-		}
-		datasets, err := r.findDatasets(ctx, tx, projectID, r.convertToStrings(datasetIDs))
+	for _, row := range rows {
+		projectID, err := asString(row[0])
 		if err != nil {
 			return nil, err
 		}
-		// jobIDs is a legacy column: jobs are looked up on demand (see Project).
-		_ = jobIDs
+		datasetIDs, _ := row[1].([]interface{})
+		datasets, err := r.findDatasets(ctx, tx, cache, projectID, r.convertToStrings(datasetIDs))
+		if err != nil {
+			return nil, err
+		}
 		projects = append(projects, NewProject(r, projectID, datasets, nil))
 	}
 	return projects, nil
@@ -245,7 +245,7 @@ func (r *Repository) FindAllProjects(ctx context.Context) ([]*Project, error) {
 		if err := rows.Scan(&projectID, &datasetIDs, &jobIDs); err != nil {
 			return nil, err
 		}
-		datasets, err := r.findDatasets(ctx, tx, projectID, r.convertToStrings(datasetIDs))
+		datasets, err := r.findDatasets(ctx, tx, nil, projectID, r.convertToStrings(datasetIDs))
 		if err != nil {
 			return nil, err
 		}
@@ -268,6 +268,7 @@ func (r *Repository) AddProjectIfNotExists(ctx context.Context, tx *sql.Tx, proj
 }
 
 func (r *Repository) AddProject(ctx context.Context, tx *sql.Tx, project *Project) error {
+	r.rows.wrote(tx)
 	if _, err := tx.Exec(
 		"INSERT projects (id, datasetIDs, jobIDs) VALUES (@id, @datasetIDs, @jobIDs)",
 		sql.Named("id", project.ID),
@@ -280,6 +281,7 @@ func (r *Repository) AddProject(ctx context.Context, tx *sql.Tx, project *Projec
 }
 
 func (r *Repository) UpdateProject(ctx context.Context, tx *sql.Tx, project *Project) error {
+	r.rows.wrote(tx)
 	if _, err := tx.Exec(
 		"UPDATE projects SET datasetIDs = @datasetIDs, jobIDs = @jobIDs WHERE id = @id",
 		sql.Named("id", project.ID),
@@ -292,6 +294,7 @@ func (r *Repository) UpdateProject(ctx context.Context, tx *sql.Tx, project *Pro
 }
 
 func (r *Repository) DeleteProject(ctx context.Context, tx *sql.Tx, project *Project) error {
+	r.rows.wrote(tx)
 	if _, err := tx.Exec("DELETE FROM projects WHERE id = @id", project.ID); err != nil {
 		return err
 	}
@@ -469,12 +472,14 @@ func (r *Repository) UpdateJob(ctx context.Context, tx *sql.Tx, job *Job) error 
 
 // TxCommitted publishes the jobs written in tx to the recent-jobs cache.
 func (r *Repository) TxCommitted(tx *sql.Tx) {
+	r.rows.txEnded(tx)
 	r.jobs.commit(tx)
 }
 
 // TxRolledBack drops the jobs written in tx: they never reached the table,
 // so a retry with the same job ID must not find them.
 func (r *Repository) TxRolledBack(tx *sql.Tx) {
+	r.rows.txEnded(tx)
 	r.jobs.discard(tx)
 }
 
@@ -501,7 +506,7 @@ func (r *Repository) FindDataset(ctx context.Context, projectID, datasetID strin
 		return nil, err
 	}
 	defer tx.Commit()
-	datasets, err := r.findDatasets(ctx, tx, projectID, []string{datasetID})
+	datasets, err := r.findDatasets(ctx, tx, nil, projectID, []string{datasetID})
 	if err != nil {
 		return nil, err
 	}
@@ -514,41 +519,33 @@ func (r *Repository) FindDataset(ctx context.Context, projectID, datasetID strin
 	return datasets[0], nil
 }
 
-func (r *Repository) findDatasets(ctx context.Context, tx *sql.Tx, projectID string, datasetIDs []string) ([]*Dataset, error) {
-	rows, err := tx.QueryContext(ctx,
-		"SELECT id, projectID, metadata FROM datasets WHERE projectID = @projectID AND id IN UNNEST(@datasetIDs)",
+func (r *Repository) findDatasets(ctx context.Context, tx *sql.Tx, cache *rowCache, projectID string, datasetIDs []string) ([]*Dataset, error) {
+	rows, err := selectRows(ctx, tx, cache, 2,
+		"SELECT id, metadata FROM datasets WHERE projectID = @projectID AND id IN UNNEST(@datasetIDs)",
 		sql.Named("projectID", projectID),
 		sql.Named("datasetIDs", datasetIDs),
 	)
 	if err != nil {
 		return nil, err
 	}
-	// Read every dataset row before issuing the batched child queries below.
 	var order []string
 	contentByID := map[string]*bigqueryv2.Dataset{}
-	for rows.Next() {
-		var (
-			datasetID string
-			projectID string
-			metadata  string
-		)
-		if err := rows.Scan(&datasetID, &projectID, &metadata); err != nil {
-			rows.Close()
+	for _, row := range rows {
+		datasetID, err := asString(row[0])
+		if err != nil {
+			return nil, err
+		}
+		metadata, err := asString(row[1])
+		if err != nil {
 			return nil, err
 		}
 		var content bigqueryv2.Dataset
 		if err := json.Unmarshal([]byte(metadata), &content); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		order = append(order, datasetID)
 		contentByID[datasetID] = &content
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	rows.Close()
 
 	if len(order) == 0 {
 		return []*Dataset{}, nil
@@ -557,15 +554,15 @@ func (r *Repository) findDatasets(ctx context.Context, tx *sql.Tx, projectID str
 	// FindProject runs on every request, so loading the tables, models and
 	// routines with one batched query each (instead of three per dataset)
 	// keeps its cost from growing with the number of datasets in the project.
-	tablesByDataset, err := r.findTablesByDatasetIDs(ctx, tx, projectID, order)
+	tablesByDataset, err := r.findTablesByDatasetIDs(ctx, tx, cache, projectID, order)
 	if err != nil {
 		return nil, err
 	}
-	modelsByDataset, err := r.findModelsByDatasetIDs(ctx, tx, projectID, order)
+	modelsByDataset, err := r.findModelsByDatasetIDs(ctx, tx, cache, projectID, order)
 	if err != nil {
 		return nil, err
 	}
-	routinesByDataset, err := r.findRoutinesByDatasetIDs(ctx, tx, projectID, order)
+	routinesByDataset, err := r.findRoutinesByDatasetIDs(ctx, tx, cache, projectID, order)
 	if err != nil {
 		return nil, err
 	}
@@ -580,88 +577,66 @@ func (r *Repository) findDatasets(ctx context.Context, tx *sql.Tx, projectID str
 	return datasets, nil
 }
 
-// findTablesByDatasetIDs loads the tables of every given dataset in one query,
-// grouped by dataset id.
-func (r *Repository) findTablesByDatasetIDs(ctx context.Context, tx *sql.Tx, projectID string, datasetIDs []string) (map[string][]*Table, error) {
-	rows, err := tx.QueryContext(ctx,
-		"SELECT id, datasetID, metadata FROM tables WHERE projectID = @projectID AND datasetID IN UNNEST(@datasetIDs)",
+// findChildrenByDatasetIDs loads the rows of one child table (tables,
+// models, routines) for every given dataset in one query, and calls add with
+// each row's dataset id, own id and decoded metadata.
+func findChildrenByDatasetIDs(ctx context.Context, tx *sql.Tx, cache *rowCache, table, projectID string, datasetIDs []string, add func(datasetID, id string, content map[string]interface{})) error {
+	rows, err := selectRows(ctx, tx, cache, 3,
+		"SELECT id, datasetID, metadata FROM "+table+" WHERE projectID = @projectID AND datasetID IN UNNEST(@datasetIDs)",
 		sql.Named("projectID", projectID),
 		sql.Named("datasetIDs", datasetIDs),
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer rows.Close()
-	result := map[string][]*Table{}
-	for rows.Next() {
-		var tableID, datasetID, metadata string
-		if err := rows.Scan(&tableID, &datasetID, &metadata); err != nil {
-			return nil, err
+	for _, row := range rows {
+		var vals [3]string
+		for i := range vals {
+			if vals[i], err = asString(row[i]); err != nil {
+				return err
+			}
 		}
 		var content map[string]interface{}
-		if err := json.Unmarshal([]byte(metadata), &content); err != nil {
-			return nil, err
+		if err := json.Unmarshal([]byte(vals[2]), &content); err != nil {
+			return err
 		}
-		result[datasetID] = append(result[datasetID], NewTable(r, projectID, datasetID, tableID, content))
+		add(vals[1], vals[0], content)
 	}
-	return result, rows.Err()
+	return nil
+}
+
+// findTablesByDatasetIDs loads the tables of every given dataset in one query,
+// grouped by dataset id.
+func (r *Repository) findTablesByDatasetIDs(ctx context.Context, tx *sql.Tx, cache *rowCache, projectID string, datasetIDs []string) (map[string][]*Table, error) {
+	result := map[string][]*Table{}
+	err := findChildrenByDatasetIDs(ctx, tx, cache, "tables", projectID, datasetIDs, func(datasetID, id string, content map[string]interface{}) {
+		result[datasetID] = append(result[datasetID], NewTable(r, projectID, datasetID, id, content))
+	})
+	return result, err
 }
 
 // findModelsByDatasetIDs loads the models of every given dataset in one query,
 // grouped by dataset id.
-func (r *Repository) findModelsByDatasetIDs(ctx context.Context, tx *sql.Tx, projectID string, datasetIDs []string) (map[string][]*Model, error) {
-	rows, err := tx.QueryContext(ctx,
-		"SELECT id, datasetID, metadata FROM models WHERE projectID = @projectID AND datasetID IN UNNEST(@datasetIDs)",
-		sql.Named("projectID", projectID),
-		sql.Named("datasetIDs", datasetIDs),
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+func (r *Repository) findModelsByDatasetIDs(ctx context.Context, tx *sql.Tx, cache *rowCache, projectID string, datasetIDs []string) (map[string][]*Model, error) {
 	result := map[string][]*Model{}
-	for rows.Next() {
-		var modelID, datasetID, metadata string
-		if err := rows.Scan(&modelID, &datasetID, &metadata); err != nil {
-			return nil, err
-		}
-		var content map[string]interface{}
-		if err := json.Unmarshal([]byte(metadata), &content); err != nil {
-			return nil, err
-		}
-		result[datasetID] = append(result[datasetID], NewModel(r, projectID, datasetID, modelID, content))
-	}
-	return result, rows.Err()
+	err := findChildrenByDatasetIDs(ctx, tx, cache, "models", projectID, datasetIDs, func(datasetID, id string, content map[string]interface{}) {
+		result[datasetID] = append(result[datasetID], NewModel(r, projectID, datasetID, id, content))
+	})
+	return result, err
 }
 
 // findRoutinesByDatasetIDs loads the routines of every given dataset in one
 // query, grouped by dataset id.
-func (r *Repository) findRoutinesByDatasetIDs(ctx context.Context, tx *sql.Tx, projectID string, datasetIDs []string) (map[string][]*Routine, error) {
-	rows, err := tx.QueryContext(ctx,
-		"SELECT id, datasetID, metadata FROM routines WHERE projectID = @projectID AND datasetID IN UNNEST(@datasetIDs)",
-		sql.Named("projectID", projectID),
-		sql.Named("datasetIDs", datasetIDs),
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+func (r *Repository) findRoutinesByDatasetIDs(ctx context.Context, tx *sql.Tx, cache *rowCache, projectID string, datasetIDs []string) (map[string][]*Routine, error) {
 	result := map[string][]*Routine{}
-	for rows.Next() {
-		var routineID, datasetID, metadata string
-		if err := rows.Scan(&routineID, &datasetID, &metadata); err != nil {
-			return nil, err
-		}
-		var content map[string]interface{}
-		if err := json.Unmarshal([]byte(metadata), &content); err != nil {
-			return nil, err
-		}
-		result[datasetID] = append(result[datasetID], NewRoutine(r, projectID, datasetID, routineID, content))
-	}
-	return result, rows.Err()
+	err := findChildrenByDatasetIDs(ctx, tx, cache, "routines", projectID, datasetIDs, func(datasetID, id string, content map[string]interface{}) {
+		result[datasetID] = append(result[datasetID], NewRoutine(r, projectID, datasetID, id, content))
+	})
+	return result, err
 }
 
 func (r *Repository) AddDataset(ctx context.Context, tx *sql.Tx, dataset *Dataset) error {
+	r.rows.wrote(tx)
 	metadata, err := json.Marshal(dataset.content)
 	if err != nil {
 		return err
@@ -681,6 +656,7 @@ func (r *Repository) AddDataset(ctx context.Context, tx *sql.Tx, dataset *Datase
 }
 
 func (r *Repository) UpdateDataset(ctx context.Context, tx *sql.Tx, dataset *Dataset) error {
+	r.rows.wrote(tx)
 	metadata, err := json.Marshal(dataset.content)
 	if err != nil {
 		return err
@@ -700,6 +676,7 @@ func (r *Repository) UpdateDataset(ctx context.Context, tx *sql.Tx, dataset *Dat
 }
 
 func (r *Repository) DeleteDataset(ctx context.Context, tx *sql.Tx, dataset *Dataset) error {
+	r.rows.wrote(tx)
 	if _, err := tx.Exec(
 		"DELETE FROM datasets WHERE projectID = @projectID AND id = @id",
 		dataset.ProjectID,
@@ -769,6 +746,7 @@ func (r *Repository) findTables(ctx context.Context, tx *sql.Tx, projectID, data
 }
 
 func (r *Repository) AddTable(ctx context.Context, tx *sql.Tx, table *Table) error {
+	r.rows.wrote(tx)
 	metadata, err := json.Marshal(table.metadata)
 	if err != nil {
 		return err
@@ -786,6 +764,7 @@ func (r *Repository) AddTable(ctx context.Context, tx *sql.Tx, table *Table) err
 }
 
 func (r *Repository) UpdateTable(ctx context.Context, tx *sql.Tx, table *Table) error {
+	r.rows.wrote(tx)
 	metadata, err := json.Marshal(table.metadata)
 	if err != nil {
 		return err
@@ -803,6 +782,7 @@ func (r *Repository) UpdateTable(ctx context.Context, tx *sql.Tx, table *Table) 
 }
 
 func (r *Repository) DeleteTable(ctx context.Context, tx *sql.Tx, table *Table) error {
+	r.rows.wrote(tx)
 	if _, err := tx.Exec(
 		"DELETE FROM tables WHERE projectID = @projectID AND datasetID = @datasetID AND id = @id",
 		table.ProjectID,
@@ -873,6 +853,7 @@ func (r *Repository) findModels(ctx context.Context, tx *sql.Tx, projectID, data
 }
 
 func (r *Repository) AddModel(ctx context.Context, tx *sql.Tx, model *Model) error {
+	r.rows.wrote(tx)
 	metadata, err := json.Marshal(model.metadata)
 	if err != nil {
 		return err
@@ -890,6 +871,7 @@ func (r *Repository) AddModel(ctx context.Context, tx *sql.Tx, model *Model) err
 }
 
 func (r *Repository) UpdateModel(ctx context.Context, tx *sql.Tx, model *Model) error {
+	r.rows.wrote(tx)
 	metadata, err := json.Marshal(model.metadata)
 	if err != nil {
 		return err
@@ -907,6 +889,7 @@ func (r *Repository) UpdateModel(ctx context.Context, tx *sql.Tx, model *Model) 
 }
 
 func (r *Repository) DeleteModel(ctx context.Context, tx *sql.Tx, model *Model) error {
+	r.rows.wrote(tx)
 	if _, err := tx.Exec(
 		"DELETE FROM models WHERE projectID = @projectID AND datasetID = @datasetID AND id = @id",
 		model.ProjectID,
@@ -978,6 +961,7 @@ func (r *Repository) findRoutines(ctx context.Context, tx *sql.Tx, projectID, da
 }
 
 func (r *Repository) AddRoutine(ctx context.Context, tx *sql.Tx, routine *Routine) error {
+	r.rows.wrote(tx)
 	metadata, err := json.Marshal(routine.metadata)
 	if err != nil {
 		return err
@@ -995,6 +979,7 @@ func (r *Repository) AddRoutine(ctx context.Context, tx *sql.Tx, routine *Routin
 }
 
 func (r *Repository) UpdateRoutine(ctx context.Context, tx *sql.Tx, routine *Routine) error {
+	r.rows.wrote(tx)
 	metadata, err := json.Marshal(routine.metadata)
 	if err != nil {
 		return err
@@ -1012,6 +997,7 @@ func (r *Repository) UpdateRoutine(ctx context.Context, tx *sql.Tx, routine *Rou
 }
 
 func (r *Repository) DeleteRoutine(ctx context.Context, tx *sql.Tx, routine *Routine) error {
+	r.rows.wrote(tx)
 	if _, err := tx.Exec(
 		"DELETE FROM routines WHERE projectID = @projectID AND datasetID = @datasetID AND id = @id",
 		sql.Named("projectID", routine.ProjectID),

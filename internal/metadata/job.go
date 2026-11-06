@@ -61,26 +61,34 @@ func (j *Job) Wait(ctx context.Context) (*internaltypes.QueryResponse, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	ticker := time.NewTicker(100 * time.Millisecond)
+	// Look before the first tick: a job is usually done by the time its
+	// results are asked for (jobs.query runs inline, and a jobs.insert
+	// query job started in the background is often finished already).
+	// Waiting a full tick first added 100 ms to every getQueryResults call.
+	// A job still running is polled every jobWaitInterval as before.
+	ticker := time.NewTicker(jobWaitInterval)
 	defer ticker.Stop()
 	for {
+		foundJob, err := j.repo.FindJob(ctx, j.ProjectID, j.ID)
+		if err != nil {
+			return nil, err
+		}
+		if foundJob != nil {
+			if foundJob.err != nil {
+				return foundJob.response, &QueryFailedError{Err: foundJob.err}
+			}
+			return foundJob.response, nil
+		}
 		select {
 		case <-ticker.C:
-			foundJob, err := j.repo.FindJob(ctx, j.ProjectID, j.ID)
-			if err != nil {
-				return nil, err
-			}
-			if foundJob != nil {
-				if foundJob.err != nil {
-					return foundJob.response, &QueryFailedError{Err: foundJob.err}
-				}
-				return foundJob.response, nil
-			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
 }
+
+// jobWaitInterval is how often Wait polls for a job that is still running.
+const jobWaitInterval = 100 * time.Millisecond
 
 func (j *Job) Cancel(ctx context.Context) error {
 	// TODO: job needs to be able to rollback
