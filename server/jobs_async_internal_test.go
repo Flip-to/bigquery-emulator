@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 )
@@ -202,6 +203,35 @@ func TestRequestsDuringLongQueryComplete(t *testing.T) {
 			}
 		case <-time.After(30 * time.Second):
 			t.Fatal("insert during a long query did not finish")
+		}
+	}
+}
+
+// A query job runs after its request released the lock, so the project it
+// received may be older than what requests in between added. Writing that
+// copy back lost their datasets: dbt runs several workers against one
+// emulator and then got 404 for a dataset it had just created.
+func TestConcurrentJobsAndDatasetsKeepAllDatasets(t *testing.T) {
+	e := newAsyncTestEnv(t)
+	const n = 12
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			e.insertQuery(fmt.Sprintf("job_conc_%d", i), "SELECT 1 AS x")
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			e.do(http.MethodPost, "/datasets", map[string]any{
+				"datasetReference": map[string]any{"projectId": "test", "datasetId": fmt.Sprintf("conc_ds_%d", i)},
+			})
+		}(i)
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if r := e.do(http.MethodGet, fmt.Sprintf("/datasets/conc_ds_%d", i), nil); r.status != http.StatusOK {
+			t.Errorf("dataset conc_ds_%d: status=%d %v", i, r.status, r.body)
 		}
 	}
 }

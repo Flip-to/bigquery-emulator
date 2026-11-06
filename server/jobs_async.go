@@ -177,7 +177,19 @@ func (h *jobsInsertHandler) startQueryJob(ctx context.Context, w http.ResponseWr
 			err = errJobAlreadyExists(projectID, jobLocation(job), jobID)
 			return
 		}
-		result, err = h.Handle(bgCtx, r)
+		// r.project was read when the request arrived, before other requests
+		// ran. Handle writes the project back (datasets, jobs), so work on a
+		// fresh copy: a stale one would drop what they added.
+		fresh, ferr := r.server.metaRepo.FindProject(bgCtx, projectID)
+		if ferr != nil {
+			err = ferr
+			return
+		}
+		if fresh == nil {
+			err = errNotFound(fmt.Sprintf("project %s is not found", projectID))
+			return
+		}
+		result, err = h.Handle(bgCtx, &jobsInsertRequest{server: r.server, project: fresh, job: job})
 	}()
 	releaseSequentialAccess(ctx)
 
