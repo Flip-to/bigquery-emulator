@@ -19,7 +19,11 @@ const slowQuery = "SELECT COUNT(*) AS n FROM UNNEST(GENERATE_ARRAY(1, 300000)) A
 type asyncTestEnv struct {
 	t    *testing.T
 	base string
+	run  string
 }
+
+// id makes a job ID unique across runs of the test binary.
+func (e *asyncTestEnv) id(name string) string { return name + "_" + e.run }
 
 // The in-memory database is shared by the servers of a test binary: give
 // each test its own job IDs.
@@ -38,7 +42,7 @@ func newAsyncTestEnv(t *testing.T) *asyncTestEnv {
 		testServer.Close()
 		_ = bqServer.Stop(context.Background())
 	})
-	return &asyncTestEnv{t: t, base: fmt.Sprintf("%s/bigquery/v2/projects/%s", testServer.URL, project)}
+	return &asyncTestEnv{t: t, run: fmt.Sprint(time.Now().UnixNano()), base: fmt.Sprintf("%s/bigquery/v2/projects/%s", testServer.URL, project)}
 }
 
 type apiResult struct {
@@ -91,17 +95,17 @@ func jobState(r apiResult) string {
 // "failed to add job: job ... is already created".
 func TestInsertExistingJobIDIsConflict(t *testing.T) {
 	e := newAsyncTestEnv(t)
-	first := e.insertQuery("job_dup", "SELECT 1 AS x")
+	first := e.insertQuery(e.id("job_dup"), "SELECT 1 AS x")
 	if first.status != http.StatusOK || jobState(first) != "DONE" {
 		t.Fatalf("first insert: status=%d state=%q body=%v", first.status, jobState(first), first.body)
 	}
-	second := e.insertQuery("job_dup", "SELECT 1 AS x")
+	second := e.insertQuery(e.id("job_dup"), "SELECT 1 AS x")
 	if second.status != http.StatusConflict {
 		t.Fatalf("second insert: status=%d, want 409: %v", second.status, second.body)
 	}
 	errBody, _ := second.body["error"].(map[string]any)
 	if errBody["code"] != float64(409) || errBody["status"] != "ALREADY_EXISTS" ||
-		errBody["message"] != "Already Exists: Job test:US.job_dup" {
+		errBody["message"] != "Already Exists: Job test:US."+e.id("job_dup") {
 		t.Fatalf("error body = %v", errBody)
 	}
 	errs, _ := errBody["errors"].([]any)
@@ -109,11 +113,11 @@ func TestInsertExistingJobIDIsConflict(t *testing.T) {
 		t.Fatalf("errors = %v, want one with reason duplicate", errs)
 	}
 	// What the client does next: fetch the job it could not create.
-	got := e.do(http.MethodGet, "/jobs/job_dup", nil)
+	got := e.do(http.MethodGet, "/jobs/"+e.id("job_dup"), nil)
 	if got.status != http.StatusOK || jobState(got) != "DONE" {
 		t.Fatalf("jobs.get after conflict: status=%d state=%q", got.status, jobState(got))
 	}
-	results := e.do(http.MethodGet, "/queries/job_dup?maxResults=10", nil)
+	results := e.do(http.MethodGet, "/queries/"+e.id("job_dup")+"?maxResults=10", nil)
 	if results.status != http.StatusOK || results.body["jobComplete"] != true {
 		t.Fatalf("getQueryResults after conflict: status=%d %v", results.status, results.body)
 	}
@@ -136,7 +140,7 @@ func TestRunningJobAnswersClientRetries(t *testing.T) {
 	e := newAsyncTestEnv(t)
 
 	start := time.Now()
-	first := e.insertQuery("job_slow", slowQuery)
+	first := e.insertQuery(e.id("job_slow"), slowQuery)
 	if first.status != http.StatusOK || jobState(first) != "RUNNING" {
 		t.Fatalf("insert: status=%d state=%q body=%v", first.status, jobState(first), first.body)
 	}
@@ -145,15 +149,15 @@ func TestRunningJobAnswersClientRetries(t *testing.T) {
 	}
 
 	retryStart := time.Now()
-	dup := e.insertQuery("job_slow", slowQuery)
+	dup := e.insertQuery(e.id("job_slow"), slowQuery)
 	if dup.status != http.StatusConflict {
 		t.Fatalf("insert with a running job ID: status=%d, want 409: %v", dup.status, dup.body)
 	}
-	got := e.do(http.MethodGet, "/jobs/job_slow", nil)
+	got := e.do(http.MethodGet, "/jobs/"+e.id("job_slow"), nil)
 	if got.status != http.StatusOK || jobState(got) != "RUNNING" {
 		t.Fatalf("jobs.get while running: status=%d state=%q", got.status, jobState(got))
 	}
-	notDone := e.do(http.MethodGet, "/queries/job_slow?timeoutMs=50", nil)
+	notDone := e.do(http.MethodGet, "/queries/"+e.id("job_slow")+"?timeoutMs=50", nil)
 	if notDone.status != http.StatusOK || notDone.body["jobComplete"] != false {
 		t.Fatalf("getQueryResults with a short timeout: status=%d %v", notDone.status, notDone.body)
 	}
@@ -161,7 +165,7 @@ func TestRunningJobAnswersClientRetries(t *testing.T) {
 		t.Fatalf("requests about a running job took %s together, want them not to wait for the query", d)
 	}
 
-	done := e.do(http.MethodGet, "/queries/job_slow?timeoutMs=20000", nil)
+	done := e.do(http.MethodGet, "/queries/"+e.id("job_slow")+"?timeoutMs=20000", nil)
 	if done.status != http.StatusOK || done.body["jobComplete"] != true {
 		t.Fatalf("getQueryResults: status=%d %v", done.status, done.body)
 	}
@@ -169,11 +173,11 @@ func TestRunningJobAnswersClientRetries(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %v, want one", done.body["rows"])
 	}
-	got = e.do(http.MethodGet, "/jobs/job_slow", nil)
+	got = e.do(http.MethodGet, "/jobs/"+e.id("job_slow"), nil)
 	if got.status != http.StatusOK || jobState(got) != "DONE" {
 		t.Fatalf("jobs.get after the query: status=%d state=%q", got.status, jobState(got))
 	}
-	if dup := e.insertQuery("job_slow", slowQuery); dup.status != http.StatusConflict {
+	if dup := e.insertQuery(e.id("job_slow"), slowQuery); dup.status != http.StatusConflict {
 		t.Fatalf("insert with a finished job ID: status=%d, want 409", dup.status)
 	}
 }
@@ -185,14 +189,23 @@ func TestRunningJobAnswersClientRetries(t *testing.T) {
 func TestRequestsDuringLongQueryComplete(t *testing.T) {
 	shrinkJobInsertWait(t, 100*time.Millisecond)
 	e := newAsyncTestEnv(t)
-	if r := e.insertQuery("job_slow_other", slowQuery); jobState(r) != "RUNNING" {
+	if r := e.insertQuery(e.id("job_slow_other"), slowQuery); jobState(r) != "RUNNING" {
 		t.Fatalf("insert: status=%d state=%q, want RUNNING: %v", r.status, jobState(r), r.body)
 	}
 	const clients = 5
 	results := make(chan apiResult, clients)
 	for i := 0; i < clients; i++ {
 		go func(i int) {
-			results <- e.insertQuery(fmt.Sprintf("job_during_%d", i), "SELECT 1 AS x")
+			id := e.id(fmt.Sprintf("job_during_%d", i))
+			r := e.insertQuery(id, "SELECT 1 AS x")
+			if r.status == http.StatusOK && jobState(r) == "RUNNING" {
+				// Slower than jobInsertWait: wait for it as a client does.
+				r = e.do(http.MethodGet, "/queries/"+id+"?timeoutMs=20000", nil)
+				if r.body["jobComplete"] == true {
+					r = e.do(http.MethodGet, "/jobs/"+id, nil)
+				}
+			}
+			results <- r
 		}(i)
 	}
 	for i := 0; i < clients; i++ {
@@ -219,18 +232,18 @@ func TestConcurrentJobsAndDatasetsKeepAllDatasets(t *testing.T) {
 		wg.Add(2)
 		go func(i int) {
 			defer wg.Done()
-			e.insertQuery(fmt.Sprintf("job_conc_%d", i), "SELECT 1 AS x")
+			e.insertQuery(e.id(fmt.Sprintf("job_conc_%d", i)), "SELECT 1 AS x")
 		}(i)
 		go func(i int) {
 			defer wg.Done()
 			e.do(http.MethodPost, "/datasets", map[string]any{
-				"datasetReference": map[string]any{"projectId": "test", "datasetId": fmt.Sprintf("conc_ds_%d", i)},
+				"datasetReference": map[string]any{"projectId": "test", "datasetId": e.id(fmt.Sprintf("conc_ds_%d", i))},
 			})
 		}(i)
 	}
 	wg.Wait()
 	for i := 0; i < n; i++ {
-		if r := e.do(http.MethodGet, fmt.Sprintf("/datasets/conc_ds_%d", i), nil); r.status != http.StatusOK {
+		if r := e.do(http.MethodGet, "/datasets/"+e.id(fmt.Sprintf("conc_ds_%d", i)), nil); r.status != http.StatusOK {
 			t.Errorf("dataset conc_ds_%d: status=%d %v", i, r.status, r.body)
 		}
 	}
