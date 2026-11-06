@@ -50,7 +50,10 @@ func New(storage Storage) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create temporary file: %w", err)
 		}
-		storage = Storage(fmt.Sprintf("file:%s?cache=shared", f.Name()))
+		// The file is removed when the server stops, so syncing it to disk on
+		// every commit buys nothing: without these pragmas each commit fsynced
+		// the temp file (about 5 ms of a 15 ms SELECT 1 on Windows).
+		storage = Storage(fmt.Sprintf("file:%s?cache=shared&%s", f.Name(), tempStoragePragmas))
 		server.storage = storage
 		server.fileCleanup = func() error {
 			return os.Remove(f.Name())
