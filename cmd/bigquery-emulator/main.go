@@ -22,7 +22,7 @@ type option struct {
 	GRPCPort     uint16           `description:"specify the grpc port number. this port used by bigquery storage api" long:"grpc-port" default:"9060"`
 	LogLevel     server.LogLevel  `description:"specify the log level (debug/info/warn/error)" long:"log-level" default:"error"`
 	LogFormat    server.LogFormat `description:"specify the log format (console/json)" long:"log-format" default:"console"`
-	Database     string           `description:"specify the database file if required. if not specified, it will be on memory" long:"database"`
+	Database     string           `description:"specify the database file to keep data across restarts. if not specified, a temporary file is used and removed on exit" long:"database"`
 	DataFromYAML string           `description:"specify the path to the YAML file that contains the initial data" long:"data-from-yaml"`
 	Version      bool             `description:"print version" long:"version" short:"v"`
 }
