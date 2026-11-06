@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"time"
 
 	internaltypes "github.com/goccy/bigquery-emulator/internal/types"
 	bigqueryv2 "google.golang.org/api/bigquery/v2"
@@ -60,24 +61,34 @@ func (j *Job) Wait(ctx context.Context) (*internaltypes.QueryResponse, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	// Jobs run synchronously: jobs.insert / jobs.query return only after the
-	// query ran and its transaction committed, so a job a client can name is
-	// already finished. One lookup is enough. The old loop slept a 100 ms tick
-	// before its first look (100 ms on every getQueryResults call), and for a
-	// job that was missing it spun until the client's deadline, since nothing
-	// else could ever complete it.
-	foundJob, err := j.repo.FindJob(ctx, j.ProjectID, j.ID)
-	if err != nil {
-		return nil, err
+	// Look before the first tick: a job is usually done by the time its
+	// results are asked for (jobs.query runs inline, and a jobs.insert
+	// query job started in the background is often finished already).
+	// Waiting a full tick first added 100 ms to every getQueryResults call.
+	// A job still running is polled every jobWaitInterval as before.
+	ticker := time.NewTicker(jobWaitInterval)
+	defer ticker.Stop()
+	for {
+		foundJob, err := j.repo.FindJob(ctx, j.ProjectID, j.ID)
+		if err != nil {
+			return nil, err
+		}
+		if foundJob != nil {
+			if foundJob.err != nil {
+				return foundJob.response, &QueryFailedError{Err: foundJob.err}
+			}
+			return foundJob.response, nil
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
-	if foundJob == nil {
-		return nil, fmt.Errorf("job %s has no result", j.ID)
-	}
-	if foundJob.err != nil {
-		return foundJob.response, &QueryFailedError{Err: foundJob.err}
-	}
-	return foundJob.response, nil
 }
+
+// jobWaitInterval is how often Wait polls for a job that is still running.
+const jobWaitInterval = 100 * time.Millisecond
 
 func (j *Job) Cancel(ctx context.Context) error {
 	// TODO: job needs to be able to rollback
