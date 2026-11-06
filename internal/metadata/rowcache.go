@@ -23,6 +23,12 @@ import (
 // end (commit or rollback) of a transaction that wrote metadata, so rows
 // read while that transaction was open, possibly uncommitted, are dropped.
 // Rows are stored only if the version did not move while they were read.
+//
+// While any transaction that wrote metadata is open the cache is bypassed
+// entirely, for reads and stores: the commit happens before the
+// end-of-transaction hook bumps the version, so rows cached while the
+// transaction was open could otherwise be served for a moment after its
+// commit, which matters once requests run concurrently.
 type rowCache struct {
 	version atomic.Uint64
 
@@ -32,6 +38,7 @@ type rowCache struct {
 
 	dirtyMu sync.Mutex
 	dirty   map[*sql.Tx]struct{}
+	open    atomic.Int64 // len(dirty), read without dirtyMu
 }
 
 func newRowCache() *rowCache {
@@ -45,22 +52,30 @@ func (c *rowCache) wrote(tx *sql.Tx) {
 		return
 	}
 	c.dirtyMu.Lock()
-	c.dirty[tx] = struct{}{}
+	if _, ok := c.dirty[tx]; !ok {
+		c.dirty[tx] = struct{}{}
+		c.open.Add(1)
+	}
 	c.dirtyMu.Unlock()
 }
 
 // txEnded invalidates again when a transaction that wrote metadata ends.
 func (c *rowCache) txEnded(tx *sql.Tx) {
 	c.dirtyMu.Lock()
-	_, ok := c.dirty[tx]
-	delete(c.dirty, tx)
-	c.dirtyMu.Unlock()
-	if ok {
+	if _, ok := c.dirty[tx]; ok {
+		delete(c.dirty, tx)
+		// Bump before reopening the cache, so nothing stored before the
+		// commit can be served after it.
 		c.version.Add(1)
+		c.open.Add(-1)
 	}
+	c.dirtyMu.Unlock()
 }
 
 func (c *rowCache) get(key string) ([][]any, bool) {
+	if c.open.Load() > 0 {
+		return nil, false
+	}
 	v := c.version.Load()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -74,7 +89,7 @@ func (c *rowCache) get(key string) ([][]any, bool) {
 func (c *rowCache) put(key string, rows [][]any, readAt uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.version.Load() != readAt {
+	if c.open.Load() > 0 || c.version.Load() != readAt {
 		return
 	}
 	if c.at != readAt {
