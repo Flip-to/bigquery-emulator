@@ -54,3 +54,19 @@ func TestNewTableWithSchemaCaseInsensitiveColumns(t *testing.T) {
 		t.Errorf("Info.userName = %v; want \"alice\"", info[0]["userName"])
 	}
 }
+
+// Legacy FLOAT (what tables.get returns) is FLOAT64 at every depth, as in BigQuery.
+func TestFormatTypeLegacyNamesNested(t *testing.T) {
+	col := NewColumn("c", RECORD, ColumnMode(RepeatedMode), ColumnFields(
+		NewColumn("x", FLOAT),
+		NewColumn("i", INTEGER),
+		NewColumn("b", BOOLEAN),
+	))
+	want := "ARRAY<STRUCT<`x` DOUBLE,`i` INT64,`b` BOOL>>"
+	if got := col.FormatType(); got != want {
+		t.Fatalf("FormatType() = %q, want %q", got, want)
+	}
+	if got := NewColumn("top", FLOAT).FormatType(); got != "DOUBLE" {
+		t.Fatalf("top-level FormatType() = %q, want DOUBLE", got)
+	}
+}

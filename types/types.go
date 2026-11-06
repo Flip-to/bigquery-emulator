@@ -226,7 +226,10 @@ func (t Type) TypeKind() zsqltypes.TypeKind {
 	case BIGDECIMAL:
 		return zsqltypes.BIG_NUMERIC
 	case FLOAT:
-		return zsqltypes.FLOAT
+		// BigQuery FLOAT is the legacy name of FLOAT64, not a 32-bit float.
+		// zsqltypes.FLOAT gave fields nested in a RECORD a 32-bit type that
+		// does not union with FLOAT64.
+		return zsqltypes.DOUBLE
 	case FLOAT64:
 		return zsqltypes.DOUBLE
 	case DOUBLE:
