@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"time"
@@ -76,10 +78,32 @@ func newPhaseTimer(ctx context.Context, sql string) *phaseTimer {
 		return &phaseTimer{}
 	}
 	sql = strings.Join(strings.Fields(sql), " ")
-	if len(sql) > 80 {
-		sql = sql[:80]
+	// sql_hash identifies the whole statement, so repeats can be counted
+	// from the log (the prefix alone is ambiguous: every dbt query starts
+	// with the same /* {"app": "dbt", ...} */ comment).
+	sum := sha256.Sum256([]byte(sql))
+	fields := []zap.Field{
+		zap.String("sql", sqlPrefix(sql, 80)),
+		zap.String("sql_hash", hex.EncodeToString(sum[:6])),
+		zap.Int("sql_len", len(sql)),
 	}
-	return &phaseTimer{log: l, last: time.Now(), fields: []zap.Field{zap.String("sql", sql)}}
+	return &phaseTimer{log: l, last: time.Now(), fields: fields}
+}
+
+// sqlPrefix returns the first n bytes of sql after any leading block
+// comments, which clients such as dbt prepend to every statement.
+func sqlPrefix(sql string, n int) string {
+	for strings.HasPrefix(sql, "/*") {
+		end := strings.Index(sql, "*/")
+		if end < 0 {
+			break
+		}
+		sql = strings.TrimSpace(sql[end+2:])
+	}
+	if len(sql) > n {
+		sql = sql[:n]
+	}
+	return sql
 }
 
 // setJobID records the job ID once it is known.

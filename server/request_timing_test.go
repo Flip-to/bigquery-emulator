@@ -75,6 +75,12 @@ func TestRequestTimingLogs(t *testing.T) {
 	if !strings.HasPrefix(fmt.Sprint(pf["sql"]), "SELECT 1") || pf["job_id"] == "" {
 		t.Errorf("phase fields: %v", pf)
 	}
+	if h, _ := pf["sql_hash"].(string); len(h) != 12 {
+		t.Errorf("sql_hash = %v, want 12 hex chars", pf["sql_hash"])
+	}
+	if n, _ := pf["sql_len"].(int64); n <= 0 {
+		t.Errorf("sql_len = %v, want > 0", pf["sql_len"])
+	}
 	for _, k := range []string{"prepare_ms", "execute_ms", "job_write_ms", "commit_ms", "format_ms"} {
 		if _, ok := pf[k].(float64); !ok {
 			t.Errorf("missing phase %s in %v", k, pf)
