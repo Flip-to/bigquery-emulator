@@ -1812,6 +1812,8 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		}
 		return nil, fmt.Errorf("unspecified job configuration query")
 	}
+	phases := newPhaseTimer(ctx, job.Configuration.Query.Query)
+	defer phases.flush("jobs.insert query phases")
 	queryProjectID, datasetID := queryProjectAndDataset(job.Configuration.Query.DefaultDataset, r.project.ID)
 	conn, err := r.server.connMgr.Connection(ctx, queryProjectID, datasetID)
 	if err != nil {
@@ -1822,6 +1824,7 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		return nil, fmt.Errorf("failed to start transaction: %w", err)
 	}
 	defer tx.RollbackIfNotCommitted()
+	phases.mark("prepare")
 	hasDestinationTable := job.Configuration.Query.DestinationTable != nil
 	startTime := time.Now()
 	response, jobErr := r.server.contentRepo.Query(
@@ -1854,6 +1857,8 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 	if job.JobReference.JobId == "" {
 		job.JobReference.JobId = randomID() // generate job id
 	}
+	phases.setJobID(job.JobReference.JobId)
+	phases.mark("execute")
 	if jobErr == nil {
 		if hasDestinationTable {
 			// insert results to destination table
@@ -1908,6 +1913,7 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 			job.Configuration.Query.DestinationTable = destRef
 		}
 	}
+	phases.mark("result_write")
 	job.Kind = "bigquery#job"
 	job.Configuration.JobType = "QUERY"
 	job.Configuration.Query.Priority = "INTERACTIVE"
@@ -1963,10 +1969,12 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		}
 		return nil, fmt.Errorf("failed to add job: %w", err)
 	}
+	phases.mark("job_write")
 	if !job.Configuration.DryRun {
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("failed to commit job: %w", err)
 		}
+		phases.mark("commit")
 		if response != nil && response.ChangedCatalog.Changed() {
 			if err := syncCatalog(ctx, r.server, r.project.ID, response.ChangedCatalog); err != nil {
 				return nil, err
@@ -2310,6 +2318,9 @@ func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*in
 		return nil, err
 	}
 	defer tx.RollbackIfNotCommitted()
+	phases := newPhaseTimer(ctx, r.queryRequest.Query)
+	defer phases.flush("jobs.query phases")
+	phases.mark("prepare")
 	startTime := time.Now()
 	response, queryErr := r.server.contentRepo.Query(
 		ctx,
@@ -2319,6 +2330,7 @@ func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*in
 		r.queryRequest.Query,
 		r.queryRequest.QueryParameters,
 	)
+	phases.mark("execute")
 	if queryErr != nil {
 		return nil, errInvalidQuery(queryErr.Error())
 	}
@@ -2338,6 +2350,7 @@ func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*in
 	// (RequestId → cached response) is a TODO; for now every call gets a
 	// fresh jobID.
 	jobID := randomID()
+	phases.setJobID(jobID)
 
 	// Persist the job in the metadata store, mirroring what
 	// jobsInsertHandler.Handle does at line ~1758. The previous behaviour
@@ -2408,16 +2421,20 @@ func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*in
 		); err != nil {
 			return nil, fmt.Errorf("failed to add job: %w", err)
 		}
+		phases.mark("job_write")
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
+		phases.mark("commit")
 		if response.ChangedCatalog.Changed() {
 			if err := syncCatalog(ctx, r.server, r.project.ID, response.ChangedCatalog); err != nil {
 				return nil, err
 			}
 		}
 	}
+	phases.mark("catalog_sync")
 	response.Rows = internaltypes.Format(response.Schema, response.Rows, r.useInt64Timestamp)
+	phases.mark("format")
 	response.JobReference = job.JobReference
 	return response, nil
 }

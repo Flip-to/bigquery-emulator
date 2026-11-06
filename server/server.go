@@ -229,6 +229,12 @@ func (s *Server) SetLogLevel(level LogLevel) error {
 	return nil
 }
 
+// SetLogger replaces the server logger, for example with one that has an
+// extra zap core attached. SetLogLevel / SetLogFormat rebuild it afterwards.
+func (s *Server) SetLogger(l *zap.Logger) {
+	s.logger = l
+}
+
 type LogFormat string
 
 const (
