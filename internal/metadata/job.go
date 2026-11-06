@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
-	"time"
 
 	internaltypes "github.com/goccy/bigquery-emulator/internal/types"
 	bigqueryv2 "google.golang.org/api/bigquery/v2"
@@ -61,25 +60,23 @@ func (j *Job) Wait(ctx context.Context) (*internaltypes.QueryResponse, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			foundJob, err := j.repo.FindJob(ctx, j.ProjectID, j.ID)
-			if err != nil {
-				return nil, err
-			}
-			if foundJob != nil {
-				if foundJob.err != nil {
-					return foundJob.response, &QueryFailedError{Err: foundJob.err}
-				}
-				return foundJob.response, nil
-			}
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	// Jobs run synchronously: jobs.insert / jobs.query return only after the
+	// query ran and its transaction committed, so a job a client can name is
+	// already finished. One lookup is enough. The old loop slept a 100 ms tick
+	// before its first look (100 ms on every getQueryResults call), and for a
+	// job that was missing it spun until the client's deadline, since nothing
+	// else could ever complete it.
+	foundJob, err := j.repo.FindJob(ctx, j.ProjectID, j.ID)
+	if err != nil {
+		return nil, err
 	}
+	if foundJob == nil {
+		return nil, fmt.Errorf("job %s has no result", j.ID)
+	}
+	if foundJob.err != nil {
+		return foundJob.response, &QueryFailedError{Err: foundJob.err}
+	}
+	return foundJob.response, nil
 }
 
 func (j *Job) Cancel(ctx context.Context) error {
