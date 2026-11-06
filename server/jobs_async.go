@@ -130,8 +130,8 @@ func (s *Server) listenAddr() string {
 
 // startQueryJob runs the query job in the background and answers jobs.insert:
 // with the finished job when it ends within jobInsertWait, otherwise with the
-// job RUNNING. The caller holds the sequential-access lock; it is released
-// here, and the background run takes it for the time the query runs.
+// job RUNNING. The caller holds the request lock; it is released here, and
+// the background run takes it for the time the query runs.
 func (h *jobsInsertHandler) startQueryJob(ctx context.Context, w http.ResponseWriter, r *jobsInsertRequest) {
 	job := r.job
 	if job.JobReference == nil {
@@ -158,14 +158,23 @@ func (h *jobsInsertHandler) startQueryJob(ctx context.Context, w http.ResponseWr
 			result *bigqueryv2.Job
 			err    error
 		)
-		r.server.seqMu.Lock()
+		// The run takes the request lock itself: shared for a read-only
+		// SELECT, exclusive otherwise. Handle finds it in bgCtx and, for a
+		// shared run, records the job as reopenForWrite describes.
+		g := &accessGuard{mu: &r.server.accessMu}
+		if r.server.walMode && sharedJob(job) {
+			g.acquire(accessShared)
+		} else {
+			g.acquire(accessExclusive)
+		}
+		bgCtx := context.WithValue(bgCtx, accessGuardKey{}, g)
 		defer func() {
 			if rec := recover(); rec != nil {
 				err = fmt.Errorf("job %s panicked: %v", jobID, rec)
 			}
 			cancel()
 			r.server.running.finish(projectID, jobID, rj, result, err)
-			r.server.seqMu.Unlock()
+			g.release()
 		}()
 		// An ID that is in the jobs table already (a retry after the
 		// original finished) is a duplicate; running it again would run
