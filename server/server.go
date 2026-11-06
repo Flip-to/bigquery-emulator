@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -33,6 +35,12 @@ type Server struct {
 	httpServer     *http.Server
 	grpcServer     *grpc.Server
 	listenCallback func(httpAddr, grpcAddr string)
+	// walMode is set when the database file runs in SQLite WAL mode, where
+	// one writer can commit while readers are open. A read-only query job
+	// then records itself under jobWriteMu while still holding the shared
+	// lock; without WAL it must promote to the exclusive lock.
+	walMode    bool
+	jobWriteMu sync.Mutex
 }
 
 // SetListenCallback registers a function invoked once the HTTP and gRPC
@@ -52,11 +60,16 @@ func New(storage Storage) (*Server, error) {
 		}
 		storage = Storage(fmt.Sprintf("file:%s?cache=shared", f.Name()))
 		server.storage = storage
+		_ = f.Close()
 		server.fileCleanup = func() error {
+			_ = os.Remove(f.Name() + "-wal")
+			_ = os.Remove(f.Name() + "-shm")
 			return os.Remove(f.Name())
 		}
 	}
-	db, err := sql.Open("googlesqlite", string(storage))
+	dsn, walMode := withConcurrencyPragmas(string(storage))
+	server.walMode = walMode
+	db, err := sql.Open("googlesqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +109,7 @@ func New(storage Storage) (*Server, error) {
 	r.Handle(uploadAPIEndpoint, &uploadHandler{}).Methods("POST")
 	r.Handle(uploadAPIEndpoint, &uploadContentHandler{}).Methods("PUT")
 	r.PathPrefix("/").Handler(&defaultHandler{})
-	r.Use(sequentialAccessMiddleware())
+	r.Use(accessLockMiddleware())
 	r.Use(recoveryMiddleware(server))
 	r.Use(loggerMiddleware(server))
 	r.Use(accessLogMiddleware())
@@ -112,6 +125,22 @@ func New(storage Storage) (*Server, error) {
 	// tunneled PATCH/PUT/DELETE reaches the correct method-specific handler.
 	server.Handler = methodOverrideMiddleware(r)
 	return server, nil
+}
+
+// withConcurrencyPragmas puts an on-disk database in WAL mode, so readers
+// and one writer run at the same time, and gives every connection a busy
+// timeout instead of failing at once with SQLITE_BUSY. In-memory databases
+// cannot use WAL and are returned unchanged.
+func withConcurrencyPragmas(dsn string) (string, bool) {
+	if !strings.HasPrefix(dsn, "file:") || strings.HasPrefix(dsn, "file::memory:") ||
+		strings.Contains(dsn, "mode=memory") || strings.Contains(dsn, "_pragma=journal_mode") {
+		return dsn, false
+	}
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + "_pragma=busy_timeout(60000)&_pragma=journal_mode(wal)", true
 }
 
 func (s *Server) Close() error {

@@ -1834,6 +1834,10 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 		job.Configuration.Query.QueryParameters,
 	)
 	endTime := time.Now()
+	if tx, err = reopenForWrite(ctx, r.server, tx, queryProjectID, datasetID); err != nil {
+		return nil, err
+	}
+	defer tx.RollbackIfNotCommitted()
 	if job.JobReference.JobId == "" {
 		job.JobReference.JobId = randomID() // generate job id
 	}
@@ -1955,6 +1959,41 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 	}
 
 	return job, nil
+}
+
+// reopenForWrite is called by a query job once its statement has run, before
+// it records the job (and, for jobs.insert, the anonymous results table).
+// When the request holds the shared lock (a read-only SELECT, see
+// accessLockMiddleware) it ends the read transaction and returns a new one
+// for those writes. With a WAL database the writes run beside the other
+// shared readers, serialized with each other by jobWriteMu; otherwise the
+// lock is promoted to exclusive. Promoting on every SELECT would queue all
+// new readers behind each job write (RWMutex favours a waiting writer), so
+// throughput would stay close to that of the old global mutex. When the
+// request holds the exclusive lock, tx is returned unchanged.
+func reopenForWrite(ctx context.Context, server *Server, tx *connection.Tx, projectID, datasetID string) (*connection.Tx, error) {
+	g, ok := ctx.Value(accessGuardKey{}).(*accessGuard)
+	if !ok || g.mode != accessShared {
+		return tx, nil
+	}
+	if err := tx.Release(); err != nil {
+		return nil, fmt.Errorf("failed to end read transaction: %w", err)
+	}
+	if server.walMode {
+		server.jobWriteMu.Lock()
+		g.jobWrites = &server.jobWriteMu
+	} else {
+		g.promote()
+	}
+	conn, err := server.connMgr.Connection(ctx, projectID, datasetID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get connection: %w", err)
+	}
+	newTx, err := conn.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start transaction: %w", err)
+	}
+	return newTx, nil
 }
 
 func queryProjectAndDataset(defaultDataset *bigqueryv2.DatasetReference, fallbackProjectID string) (string, string) {
@@ -2268,6 +2307,10 @@ func (h *jobsQueryHandler) Handle(ctx context.Context, r *jobsQueryRequest) (*in
 		return nil, errInvalidQuery(queryErr.Error())
 	}
 	endTime := time.Now()
+	if tx, err = reopenForWrite(ctx, r.server, tx, queryProjectID, datasetID); err != nil {
+		return nil, err
+	}
+	defer tx.RollbackIfNotCommitted()
 	// jobs.query allocates jobIDs server-side (real BigQuery does the
 	// same). queryRequest.RequestId is the *idempotency* key — same
 	// RequestId on retry should return the cached result — and is

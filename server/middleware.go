@@ -1,8 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"compress/gzip"
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"runtime"
 	"strings"
@@ -29,15 +34,181 @@ func methodOverrideMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func sequentialAccessMiddleware() func(http.Handler) http.Handler {
-	var mu sync.Mutex
+// accessMode is how much of the emulator a request locks.
+type accessMode int
+
+const (
+	accessNone accessMode = iota
+	// accessShared lets the request run alongside other shared requests.
+	// Only requests that read SQLite take it: metadata GETs and query jobs
+	// whose statement is a single SELECT (see sharedQuery).
+	accessShared
+	// accessExclusive runs the request alone: DDL, DML, loads, inserts,
+	// patches, deletes and anything not known to be read-only.
+	accessExclusive
+)
+
+// accessGuard is the lock one request holds. It lives in the request
+// context so a shared query job can promote itself to exclusive once its
+// SELECT has run, to record the job (and its anonymous results table).
+type accessGuard struct {
+	mu   *sync.RWMutex
+	mode accessMode
+	// jobWrites is held while a shared request records its job; see
+	// reopenForWrite.
+	jobWrites *sync.Mutex
+}
+
+type accessGuardKey struct{}
+
+func (g *accessGuard) acquire(mode accessMode) {
+	switch mode {
+	case accessShared:
+		g.mu.RLock()
+	case accessExclusive:
+		g.mu.Lock()
+	}
+	g.mode = mode
+}
+
+func (g *accessGuard) release() {
+	if g.jobWrites != nil {
+		g.jobWrites.Unlock()
+		g.jobWrites = nil
+	}
+	switch g.mode {
+	case accessShared:
+		g.mu.RUnlock()
+	case accessExclusive:
+		g.mu.Unlock()
+	}
+	g.mode = accessNone
+}
+
+// promote turns a shared lock into an exclusive one and reports whether it
+// did. The two are not atomic: another writer may run in between, so the
+// caller must have ended every SQLite transaction it opened under the
+// shared lock (an open read transaction would make that writer fail with
+// SQLITE_LOCKED) and must not rely on what it read still being current.
+func (g *accessGuard) promote() bool {
+	if g.mode != accessShared {
+		return false
+	}
+	g.mu.RUnlock()
+	g.mode = accessNone
+	g.acquire(accessExclusive)
+	return true
+}
+
+// accessLockMiddleware replaces the former single global mutex with a
+// read/write lock. SQLite runs in shared-cache mode, where a connection
+// that writes a table makes concurrent readers of it fail with
+// SQLITE_LOCKED instead of waiting, so every request that writes must run
+// alone; requests that only read run concurrently. Everything else the
+// requests share is safe for concurrent use: the googlesqlite catalog and
+// the googlesql wasm module serialize themselves, every pooled connection
+// has its own analyzer, and the metadata job cache has its own mutex.
+func accessLockMiddleware() func(http.Handler) http.Handler {
+	var mu sync.RWMutex
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-			next.ServeHTTP(w, r)
+			mode, err := classifyAccess(r)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			g := &accessGuard{mu: &mu}
+			g.acquire(mode)
+			defer g.release()
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), accessGuardKey{}, g)))
 		})
 	}
+}
+
+// classifyAccess picks the lock a request needs. A query job is inspected
+// before any lock is taken, so its body is read (and gunzipped) here and
+// handed on to the handler.
+func classifyAccess(r *http.Request) (accessMode, error) {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		return accessShared, nil
+	case http.MethodPost:
+	default:
+		return accessExclusive, nil
+	}
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	isJobsInsert := strings.HasSuffix(path, "/jobs") && !strings.Contains(path, "/upload/")
+	isJobsQuery := strings.HasSuffix(path, "/queries")
+	if !isJobsInsert && !isJobsQuery {
+		return accessExclusive, nil
+	}
+	body, err := readRequestBody(r)
+	if err != nil {
+		return accessExclusive, err
+	}
+	if sharedQuery(body, isJobsInsert) {
+		return accessShared, nil
+	}
+	return accessExclusive, nil
+}
+
+// readRequestBody reads the whole body, gunzipping it, and replaces it
+// with the decoded bytes so the handler reads the same content.
+func readRequestBody(r *http.Request) ([]byte, error) {
+	var reader io.Reader = r.Body
+	if r.Header.Get(contentEncoding) == encodingTypeGzip {
+		gz, err := gzip.NewReader(r.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode gzip content: %s", err)
+		}
+		defer gz.Close()
+		reader = gz
+		r.Header.Del(contentEncoding)
+	}
+	body, err := io.ReadAll(reader)
+	// A gzip body flushed but not closed delivers all its content yet ends
+	// with ErrUnexpectedEOF; the handler's json.Unmarshal validates it.
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, err
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, nil
+}
+
+// sharedQuery reports whether a jobs.insert (isJobsInsert) or jobs.query
+// body runs one read-only SELECT with no destination table. statementType
+// classifies the text lexically: one statement led by SELECT, WITH,
+// FROM, VALUES or a parenthesis. BigQuery has no data-modifying WITH, so
+// such a statement cannot write.
+func sharedQuery(body []byte, isJobsInsert bool) bool {
+	var query string
+	if isJobsInsert {
+		var job struct {
+			Configuration *struct {
+				Query *struct {
+					Query            string          `json:"query"`
+					DestinationTable json.RawMessage `json:"destinationTable"`
+				} `json:"query"`
+			} `json:"configuration"`
+		}
+		if err := json.Unmarshal(body, &job); err != nil || job.Configuration == nil || job.Configuration.Query == nil {
+			return false
+		}
+		if len(job.Configuration.Query.DestinationTable) != 0 && string(job.Configuration.Query.DestinationTable) != "null" {
+			return false
+		}
+		query = job.Configuration.Query.Query
+	} else {
+		var req struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return false
+		}
+		query = req.Query
+	}
+	return strings.TrimSpace(query) != "" && statementType(query) == "SELECT"
 }
 
 func recoveryMiddleware(s *Server) func(http.Handler) http.Handler {
