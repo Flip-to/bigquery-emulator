@@ -224,12 +224,19 @@ func (s *Server) Load(sources ...Source) error {
 	return nil
 }
 
+// readHeaderTimeout is a variable so tests can shrink it.
+var readHeaderTimeout = 15 * time.Second
+
 func (s *Server) Serve(ctx context.Context, httpAddr, grpcAddr string) error {
+	// Requests are serialized by sequentialAccessMiddleware, so a request can
+	// wait a long time for its turn after the connection was accepted.
+	// ReadTimeout/WriteTimeout count from accept and would fail queued
+	// requests (and long queries) with i/o timeouts; only bound the time a
+	// client may take to send the request headers.
 	httpServer := &http.Server{
-		Handler:      s.Handler,
-		Addr:         httpAddr,
-		WriteTimeout: 5 * time.Minute,
-		ReadTimeout:  15 * time.Second,
+		Handler:           s.Handler,
+		Addr:              httpAddr,
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
 	s.httpServer = httpServer
 

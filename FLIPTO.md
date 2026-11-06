@@ -109,6 +109,7 @@ Windows native binary: set `TZDIR` to a drive-relative path holding zoneinfo
 | nested subquery column IDs in SQL UDF bodies | googlesqlite | goccy/googlesqlite#102 |
 | IS [NOT] TRUE / FALSE never NULL | googlesqlite | third-party goccy/googlesqlite#71 (carried as is) |
 | FLOAT64 text rendering (CAST, CONCAT, FORMAT, TO_JSON_STRING) | googlesqlite | third-party goccy/googlesqlite#58 (carried as is) |
+| the HTTP server no longer fails queued requests with `read tcp ...: i/o timeout` (400 on jobs.insert / jobs.query with several concurrent dbt runs, Flip-to/dbt-virtual#34): requests are serialized by a mutex and `ReadTimeout` (15 s) / `WriteTimeout` (5 min) count from connection accept, so a request that waited in the queue could no longer read its body; now only `ReadHeaderTimeout` (15 s) is set. Regression test `TestQueuedRequestSurvivesReadDeadline` (`server/read_timeout_internal_test.go`) | emulator | none |
 
 ## Keeping the fork current
 
