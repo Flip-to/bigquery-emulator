@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -33,6 +34,10 @@ type Server struct {
 	httpServer     *http.Server
 	grpcServer     *grpc.Server
 	listenCallback func(httpAddr, grpcAddr string)
+	// seqMu serializes request handling (see sequentialAccessMiddleware).
+	seqMu sync.Mutex
+	// running holds the query jobs jobs.insert accepted and has not finished.
+	running runningJobs
 }
 
 // SetListenCallback registers a function invoked once the HTTP and gRPC
@@ -99,7 +104,8 @@ func New(storage Storage) (*Server, error) {
 	r.Handle(uploadAPIEndpoint, &uploadHandler{}).Methods("POST")
 	r.Handle(uploadAPIEndpoint, &uploadContentHandler{}).Methods("PUT")
 	r.PathPrefix("/").Handler(&defaultHandler{})
-	r.Use(sequentialAccessMiddleware())
+	r.Use(runningJobMiddleware(server))
+	r.Use(sequentialAccessMiddleware(server))
 	r.Use(recoveryMiddleware(server))
 	r.Use(loggerMiddleware(server))
 	r.Use(accessLogMiddleware())
@@ -227,12 +233,19 @@ func (s *Server) Load(sources ...Source) error {
 	return nil
 }
 
+// readHeaderTimeout is a variable so tests can shrink it.
+var readHeaderTimeout = 15 * time.Second
+
 func (s *Server) Serve(ctx context.Context, httpAddr, grpcAddr string) error {
+	// Requests are serialized by sequentialAccessMiddleware, so a request can
+	// wait a long time for its turn after the connection was accepted.
+	// ReadTimeout/WriteTimeout count from accept and would fail queued
+	// requests (and long queries) with i/o timeouts; only bound the time a
+	// client may take to send the request headers.
 	httpServer := &http.Server{
-		Handler:      s.Handler,
-		Addr:         httpAddr,
-		WriteTimeout: 5 * time.Minute,
-		ReadTimeout:  15 * time.Second,
+		Handler:           s.Handler,
+		Addr:              httpAddr,
+		ReadHeaderTimeout: readHeaderTimeout,
 	}
 	s.httpServer = httpServer
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"compress/gzip"
 	"fmt"
 	"net/http"
@@ -29,13 +30,37 @@ func methodOverrideMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func sequentialAccessMiddleware() func(http.Handler) http.Handler {
-	var mu sync.Mutex
+// seqGuard is the sequential-access lock one request holds. A handler that
+// hands its work to a background goroutine (jobs.insert) releases it early.
+type seqGuard struct {
+	mu   *sync.Mutex
+	held bool
+}
+
+func (g *seqGuard) release() {
+	if g.held {
+		g.held = false
+		g.mu.Unlock()
+	}
+}
+
+type seqGuardKey struct{}
+
+// releaseSequentialAccess unlocks the sequential-access lock of the request
+// in ctx, if it holds it.
+func releaseSequentialAccess(ctx context.Context) {
+	if g, ok := ctx.Value(seqGuardKey{}).(*seqGuard); ok {
+		g.release()
+	}
+}
+
+func sequentialAccessMiddleware(s *Server) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-			next.ServeHTTP(w, r)
+			s.seqMu.Lock()
+			g := &seqGuard{mu: &s.seqMu, held: true}
+			defer g.release()
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), seqGuardKey{}, g)))
 		})
 	}
 }
