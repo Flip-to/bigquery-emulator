@@ -21,15 +21,28 @@ func TestRowCacheInvalidation(t *testing.T) {
 		t.Fatal("entry served after a metadata write")
 	}
 
-	// Rows read while the writing transaction is open may be uncommitted:
-	// the end of that transaction (commit or rollback) drops them too.
+	// While the writing transaction is open the cache is bypassed: nothing
+	// is stored or served, so nothing read before its commit survives it.
 	c.put("k", rows, c.version.Load())
-	if _, ok := c.get("k"); !ok {
-		t.Fatal("entry stored during the write tx not served")
+	if _, ok := c.get("k"); ok {
+		t.Fatal("cache served while a metadata write tx is open")
 	}
 	c.txEnded(tx)
 	if _, ok := c.get("k"); ok {
-		t.Fatal("entry read during a write tx served after that tx ended")
+		t.Fatal("entry offered during a write tx served after that tx ended")
+	}
+	c.put("k", rows, c.version.Load())
+	if _, ok := c.get("k"); !ok {
+		t.Fatal("cache not reopened after the write tx ended")
+	}
+	// A second write in the same tx is counted once.
+	tx2 := new(sql.Tx)
+	c.wrote(tx2)
+	c.wrote(tx2)
+	c.txEnded(tx2)
+	c.put("k", rows, c.version.Load())
+	if _, ok := c.get("k"); !ok {
+		t.Fatal("cache still bypassed after a tx that wrote twice ended")
 	}
 
 	// Ending a transaction that wrote nothing keeps the cache.
