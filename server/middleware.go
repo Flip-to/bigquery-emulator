@@ -1,8 +1,9 @@
 package server
 
 import (
-	"context"
 	"compress/gzip"
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -10,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/gorilla/mux"
+	bigqueryv2 "google.golang.org/api/bigquery/v2"
 	"go.uber.org/zap"
 
 	"github.com/goccy/bigquery-emulator/internal/logger"
@@ -30,39 +32,185 @@ func methodOverrideMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// seqGuard is the sequential-access lock one request holds. A handler that
-// hands its work to a background goroutine (jobs.insert) releases it early.
-type seqGuard struct {
-	mu   *sync.Mutex
-	held bool
+// accessMode is how much of the emulator a request locks.
+type accessMode int
+
+const (
+	accessNone accessMode = iota
+	// accessShared lets the request run alongside other shared requests.
+	// Only requests that read SQLite take it: metadata GETs and query jobs
+	// whose statement is a single SELECT (see sharedQuery).
+	accessShared
+	// accessExclusive runs the request alone: DDL, DML, loads, inserts,
+	// patches, deletes and anything not known to be read-only.
+	accessExclusive
+)
+
+// accessGuard is the lock one request holds. It lives in the request
+// context so a shared query job can promote itself to exclusive once its
+// SELECT has run, to record the job (and its anonymous results table).
+type accessGuard struct {
+	mu   *sync.RWMutex
+	mode accessMode
+	// jobWrites is held while a shared request records its job; see
+	// reopenForWrite.
+	jobWrites *sync.Mutex
 }
 
-func (g *seqGuard) release() {
-	if g.held {
-		g.held = false
+type accessGuardKey struct{}
+
+func (g *accessGuard) acquire(mode accessMode) {
+	switch mode {
+	case accessShared:
+		g.mu.RLock()
+	case accessExclusive:
+		g.mu.Lock()
+	}
+	g.mode = mode
+}
+
+func (g *accessGuard) release() {
+	if g.jobWrites != nil {
+		g.jobWrites.Unlock()
+		g.jobWrites = nil
+	}
+	switch g.mode {
+	case accessShared:
+		g.mu.RUnlock()
+	case accessExclusive:
 		g.mu.Unlock()
 	}
+	g.mode = accessNone
 }
 
-type seqGuardKey struct{}
+// promote turns a shared lock into an exclusive one and reports whether it
+// did. The two are not atomic: another writer may run in between, so the
+// caller must have ended every SQLite transaction it opened under the
+// shared lock (an open read transaction would make that writer fail with
+// SQLITE_LOCKED) and must not rely on what it read still being current.
+func (g *accessGuard) promote() bool {
+	if g.mode != accessShared {
+		return false
+	}
+	g.mu.RUnlock()
+	g.mode = accessNone
+	g.acquire(accessExclusive)
+	return true
+}
 
-// releaseSequentialAccess unlocks the sequential-access lock of the request
-// in ctx, if it holds it.
+// releaseSequentialAccess releases the lock of the request in ctx, if it
+// holds one. jobs.insert calls it once it has handed its query to a
+// background run, which takes the lock itself (see startQueryJob).
 func releaseSequentialAccess(ctx context.Context) {
-	if g, ok := ctx.Value(seqGuardKey{}).(*seqGuard); ok {
+	if g, ok := ctx.Value(accessGuardKey{}).(*accessGuard); ok {
 		g.release()
 	}
 }
 
-func sequentialAccessMiddleware(s *Server) func(http.Handler) http.Handler {
+// accessLockMiddleware replaces the former single global mutex with a
+// read/write lock. Requests that only read run concurrently; every request
+// that writes (DDL, DML, loads, inserts, patches, deletes, or anything not
+// known to be read-only) runs alone. The on-disk database is in WAL mode
+// (see withConcurrencyPragmas), so readers never see a half-written state
+// and a read-only query job can record itself beside other readers (see
+// reopenForWrite). Everything else the requests share is safe for
+// concurrent use: the googlesqlite catalog and the googlesql wasm module
+// serialize themselves, every pooled connection has its own analyzer and
+// its own SQLite instance, and the metadata job cache has its own mutex.
+func accessLockMiddleware(s *Server) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			s.seqMu.Lock()
-			g := &seqGuard{mu: &s.seqMu, held: true}
+			mode, err := classifyAccess(r)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if !s.walMode {
+				// Without WAL (an in-memory database) nothing runs
+				// concurrently: the SQLite driver has no shared cache, so
+				// every pooled connection to file::memory: is a separate,
+				// empty database, and a second connection only stays out of
+				// the pool while requests run one at a time.
+				mode = accessExclusive
+			}
+			g := &accessGuard{mu: &s.accessMu}
+			g.acquire(mode)
 			defer g.release()
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), seqGuardKey{}, g)))
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), accessGuardKey{}, g)))
 		})
 	}
+}
+
+// classifyAccess picks the lock a request needs. A query job is inspected
+// before any lock is taken, so its body is read (and gunzipped) here and
+// handed on to the handler.
+func classifyAccess(r *http.Request) (accessMode, error) {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		return accessShared, nil
+	case http.MethodPost:
+	default:
+		return accessExclusive, nil
+	}
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	isJobsInsert := strings.HasSuffix(path, "/jobs") && !strings.Contains(path, "/upload/")
+	isJobsQuery := strings.HasSuffix(path, "/queries")
+	if !isJobsInsert && !isJobsQuery {
+		return accessExclusive, nil
+	}
+	body, err := readRequestBody(r)
+	if err != nil {
+		return accessExclusive, err
+	}
+	if sharedQuery(body, isJobsInsert) {
+		return accessShared, nil
+	}
+	return accessExclusive, nil
+}
+
+// sharedJob reports whether a query job runs one read-only SELECT with no
+// destination table; see sharedQuery.
+func sharedJob(job *bigqueryv2.Job) bool {
+	if job == nil || job.Configuration == nil || job.Configuration.Query == nil {
+		return false
+	}
+	q := job.Configuration.Query
+	return q.DestinationTable == nil && strings.TrimSpace(q.Query) != "" && statementType(q.Query) == "SELECT"
+}
+
+// sharedQuery reports whether a jobs.insert (isJobsInsert) or jobs.query
+// body runs one read-only SELECT with no destination table. statementType
+// classifies the text lexically: one statement led by SELECT, WITH,
+// FROM, VALUES or a parenthesis. BigQuery has no data-modifying WITH, so
+// such a statement cannot write.
+func sharedQuery(body []byte, isJobsInsert bool) bool {
+	var query string
+	if isJobsInsert {
+		var job struct {
+			Configuration *struct {
+				Query *struct {
+					Query            string          `json:"query"`
+					DestinationTable json.RawMessage `json:"destinationTable"`
+				} `json:"query"`
+			} `json:"configuration"`
+		}
+		if err := json.Unmarshal(body, &job); err != nil || job.Configuration == nil || job.Configuration.Query == nil {
+			return false
+		}
+		if len(job.Configuration.Query.DestinationTable) != 0 && string(job.Configuration.Query.DestinationTable) != "null" {
+			return false
+		}
+		query = job.Configuration.Query.Query
+	} else {
+		var req struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			return false
+		}
+		query = req.Query
+	}
+	return strings.TrimSpace(query) != "" && statementType(query) == "SELECT"
 }
 
 func recoveryMiddleware(s *Server) func(http.Handler) http.Handler {

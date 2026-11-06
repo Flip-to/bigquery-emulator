@@ -67,6 +67,18 @@ func (t *Tx) RollbackIfNotCommitted() error {
 	return t.tx.Rollback()
 }
 
+// Release rolls back a transaction that only read and returns its
+// connection to the pool. A later RollbackIfNotCommitted is a no-op.
+func (t *Tx) Release() error {
+	if t.committed {
+		return nil
+	}
+	t.committed = true
+	defer t.conn.Conn.Close()
+	defer t.ended(false)
+	return t.tx.Rollback()
+}
+
 func (t *Tx) Commit() error {
 	if err := t.tx.Commit(); err != nil {
 		t.ended(false)
