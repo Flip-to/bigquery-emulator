@@ -27,6 +27,7 @@ type ErrorFormat struct {
 	Errors  []*ServerError `json:"errors"`
 	Code    int            `json:"code"`
 	Message string         `json:"message"`
+	Status  string         `json:"status,omitempty"`
 }
 
 func (e *ServerError) ErrorProto() *bigqueryv2.ErrorProto {
@@ -44,6 +45,7 @@ func (e *ServerError) Response() []byte {
 			Errors:  []*ServerError{e},
 			Code:    e.Status,
 			Message: e.Message,
+			Status:  e.grpcStatus(),
 		},
 	})
 	return b
@@ -254,4 +256,14 @@ func errTimeout(msg string) *ServerError {
 		Reason:  Timeout,
 		Message: msg,
 	}
+}
+
+// grpcStatus is the google.rpc.Code name BigQuery adds to the errors it
+// reports with these HTTP statuses.
+func (e *ServerError) grpcStatus() string {
+	switch e.Status {
+	case http.StatusConflict:
+		return "ALREADY_EXISTS"
+	}
+	return ""
 }

@@ -1380,24 +1380,17 @@ func (h *jobsInsertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			applyNullQueryParameters(rawReq.Configuration.Query.QueryParameters, job.Configuration.Query.QueryParameters)
 		}
 	}
-	res, err := h.Handle(ctx, &jobsInsertRequest{
+	req := &jobsInsertRequest{
 		server:  server,
 		project: project,
 		job:     &job,
-	})
-	if err != nil {
-		// Preserve typed *ServerError (e.g. a 404 notFound for a missing
-		// destination table under CREATE_NEVER) so the client sees the
-		// real HTTP status rather than a blanket 400 jobInternalError.
-		var serr *ServerError
-		if errors.As(err, &serr) {
-			errorResponse(ctx, w, serr)
-			return
-		}
-		errorResponse(ctx, w, errJobInternalError(err.Error()))
+	}
+	if job.Configuration != nil && job.Configuration.Query != nil && !job.Configuration.DryRun {
+		h.startQueryJob(ctx, w, req)
 		return
 	}
-	encodeResponse(ctx, w, res)
+	res, err := h.Handle(ctx, req)
+	writeJobInsertResult(ctx, w, res, err)
 }
 
 type jobsInsertRequest struct {
@@ -1590,6 +1583,9 @@ func (h *jobsInsertHandler) importFromGCS(ctx context.Context, r *jobsInsertRequ
 			nil,
 		),
 	); err != nil {
+		if errors.Is(err, metadata.ErrDuplicatedJob) {
+			return nil, errJobAlreadyExists(r.project.ID, jobLocation(job), job.JobReference.JobId)
+		}
 		return nil, fmt.Errorf("failed to add job: %w", err)
 	}
 	if !job.Configuration.DryRun {
@@ -1697,6 +1693,9 @@ func (h *jobsInsertHandler) exportToGCS(ctx context.Context, r *jobsInsertReques
 			nil,
 		),
 	); err != nil {
+		if errors.Is(err, metadata.ErrDuplicatedJob) {
+			return nil, errJobAlreadyExists(r.project.ID, jobLocation(job), job.JobReference.JobId)
+		}
 		return nil, fmt.Errorf("failed to add job: %w", err)
 	}
 	if !job.Configuration.DryRun {
@@ -1941,6 +1940,9 @@ func (h *jobsInsertHandler) Handle(ctx context.Context, r *jobsInsertRequest) (*
 			jobErr,
 		),
 	); err != nil {
+		if errors.Is(err, metadata.ErrDuplicatedJob) {
+			return nil, errJobAlreadyExists(r.project.ID, jobLocation(job), job.JobReference.JobId)
+		}
 		return nil, fmt.Errorf("failed to add job: %w", err)
 	}
 	if !job.Configuration.DryRun {
